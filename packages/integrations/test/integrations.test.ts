@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCrawlDb, setMeta, type Db } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, MemoryStore, importAnalytics, importSearchConsole, pagesForSpeedTest, parsePageSpeed, runPageSpeed } from '../src/index.ts';
+import { ApiCache, CostConfirmationRequired, DataForSeo, MemoryStore, dataForSeoBasicToken, importAnalytics, importSearchConsole, pagesForSpeedTest, parsePageSpeed, runPageSpeed } from '../src/index.ts';
 
 let home: string;
 let cache: ApiCache;
@@ -51,6 +51,15 @@ describe('DataForSEO cost control', () => {
     await new DataForSeo(secrets, cache, fetchImpl as never).backlinkSummary('example.com', { confirmed: true });
     const headers = fetchImpl.mock.calls[0][1].headers as Record<string, string>;
     expect(headers.authorization).toBe(`Basic ${Buffer.from('login:password').toString('base64')}`);
+  });
+
+  it('accepts a plain password or the dashboard Base64 token', () => {
+    const token = Buffer.from('me@x.com:secret1234').toString('base64');
+    expect(dataForSeoBasicToken('me@x.com:secret1234')).toBe(token);
+    expect(dataForSeoBasicToken(token)).toBe(token);
+    expect(dataForSeoBasicToken(`me@x.com:${token}`)).toBe(token);
+    // A password that happens to be valid Base64 is still treated as a password.
+    expect(dataForSeoBasicToken('me@x.com:abcd')).toBe(Buffer.from('me@x.com:abcd').toString('base64'));
   });
 
   it('re-fetches on refresh, and only then with confirmation', async () => {
@@ -144,6 +153,15 @@ describe('PageSpeed', () => {
     insert.run(2, 'https://e.com/2');
     db.prepare(`INSERT INTO links (source_id, target_id, type) VALUES (1, 2, 'a')`).run();
     expect(pagesForSpeedTest(db, 1)).toEqual(['https://e.com/2']);
+    // Repeat links from one page count once, so page 3 outranks page 2.
+    insert.run(3, 'https://e.com/3');
+    insert.run(4, 'https://e.com/4');
+    const link = db.prepare(`INSERT INTO links (source_id, target_id, type) VALUES (?, ?, 'a')`);
+    link.run(1, 2);
+    link.run(1, 2);
+    link.run(1, 3);
+    link.run(4, 3);
+    expect(pagesForSpeedTest(db, 1)).toEqual(['https://e.com/3']);
     const fetchImpl = vi.fn(async (url: URL) => url.search.includes('%2F1') ? new Response(JSON.stringify({ error: { message: 'Quota' } }), { status: 429 }) : ok({ lighthouseResult: { categories: { performance: { score: 1 } }, audits: {} } }));
     const results = await runPageSpeed(db, secrets, ['https://e.com/1', 'https://e.com/2'], 'mobile', fetchImpl as never);
     expect(results.map((r) => r.error ?? r.performance)).toEqual(['Quota', 100]);

@@ -60,6 +60,10 @@ describe('HTML parsing', () => {
     expect(facts.wordCount).toBe(2);
     expect(facts.links.map((l) => l.url)).toEqual(['https://example.com/menu']);
   });
+  it('skips Cloudflare email-protection links', () => {
+    const facts = parseHtml('<a href="/cdn-cgi/l/email-protection#abc123">Email us</a><a href="/real">Real</a>', URL_A);
+    expect(facts.links.map((l) => l.url)).toEqual(['https://example.com/real']);
+  });
   it('ignores titles inside SVG icons', () => {
     const facts = parseHtml('<head><title>Page</title></head><body><svg><title>Icon</title></svg></body>', URL_A);
     expect(facts.titles).toEqual(['Page']);

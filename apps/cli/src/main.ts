@@ -58,6 +58,12 @@ function printFinished(id: string) {
   for (const row of summary) console.log(`${row.severity.padEnd(8)} ${String(row.count).padStart(6)}  ${row.title} (${row.type})`);
 }
 
+// A closed pipe, such as `sak list | head -1`, means the reader has what it wants.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EPIPE') process.exit(0);
+  throw error;
+});
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const { values, positionals } = parseArgs({

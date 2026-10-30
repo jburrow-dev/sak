@@ -33,7 +33,7 @@ export function pagesForSpeedTest(db: Db, limit: number): string[] {
   const rows = db.prepare(`SELECT u.url FROM urls u
     LEFT JOIN links l ON l.target_id = u.id AND l.type = 'a'
     WHERE u.kind = 'page' AND u.indexable = 1
-    GROUP BY u.id ORDER BY COUNT(l.source_id) DESC, u.id LIMIT ?`).all(limit) as { url: string }[];
+    GROUP BY u.id ORDER BY COUNT(DISTINCT l.source_id) DESC, u.id LIMIT ?`).all(limit) as { url: string }[];
   return rows.map((r) => r.url);
 }
 
