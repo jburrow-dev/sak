@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "sak": "node apps/cli/src/main.ts",
     "test": "vitest run",
@@ -14,6 +17,6 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "vitest": "^5.0.5"
   }
 }
