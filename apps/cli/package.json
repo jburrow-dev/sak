@@ -1,0 +1,8 @@
+{
+  "name": "@sak/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "sak": "./src/main.ts" },
+  "dependencies": { "@sak/core": "*", "@sak/integrations": "*", "@sak/web": "*" }
+}

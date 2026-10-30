@@ -1,0 +1,19 @@
+{
+  "name": "sak",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "sak": "node apps/cli/src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:web": "npm run build -w apps/web"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

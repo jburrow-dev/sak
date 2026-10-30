@@ -1,0 +1,150 @@
+import { createRequire } from 'node:module';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type BetterSqlite3 from 'better-sqlite3';
+
+const require = createRequire(import.meta.url);
+export const Database = require('better-sqlite3') as typeof BetterSqlite3;
+export type Db = BetterSqlite3.Database;
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS crawl_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS urls (
+  id INTEGER PRIMARY KEY,
+  url TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  depth INTEGER,
+  in_sitemap INTEGER NOT NULL DEFAULT 0,
+  indexable INTEGER,
+  indexability_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS urls_state ON urls(state, kind, id);
+CREATE TABLE IF NOT EXISTS responses (
+  url_id INTEGER PRIMARY KEY REFERENCES urls(id),
+  status INTEGER,
+  content_type TEXT,
+  redirect_target TEXT,
+  x_robots TEXT,
+  link_canonical TEXT,
+  response_ms INTEGER,
+  bytes INTEGER,
+  error TEXT,
+  blocked_reason TEXT,
+  fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS links (
+  source_id INTEGER NOT NULL REFERENCES urls(id),
+  target_id INTEGER NOT NULL REFERENCES urls(id),
+  type TEXT NOT NULL,
+  anchor TEXT,
+  nofollow INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS links_target ON links(target_id);
+CREATE INDEX IF NOT EXISTS links_source ON links(source_id);
+CREATE TABLE IF NOT EXISTS page_elements (
+  url_id INTEGER PRIMARY KEY REFERENCES urls(id),
+  titles TEXT NOT NULL,
+  meta_descriptions TEXT NOT NULL,
+  h1s TEXT NOT NULL,
+  meta_robots TEXT NOT NULL,
+  canonicals TEXT NOT NULL,
+  word_count INTEGER NOT NULL,
+  text_hash TEXT,
+  html_bytes INTEGER NOT NULL,
+  script_count INTEGER NOT NULL,
+  has_empty_app_root INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hreflang (
+  url_id INTEGER NOT NULL REFERENCES urls(id),
+  lang TEXT NOT NULL,
+  href TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS hreflang_url ON hreflang(url_id);
+CREATE TABLE IF NOT EXISTS structured_data (
+  url_id INTEGER NOT NULL REFERENCES urls(id),
+  raw TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS redirect_hops (
+  start_id INTEGER NOT NULL REFERENCES urls(id),
+  hop INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  status INTEGER,
+  PRIMARY KEY (start_id, hop)
+);
+CREATE TABLE IF NOT EXISTS issues (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  url TEXT NOT NULL,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS issues_type ON issues(type);
+CREATE INDEX IF NOT EXISTS issues_url ON issues(url);
+CREATE TABLE IF NOT EXISTS search_console (
+  url TEXT PRIMARY KEY,
+  clicks REAL, impressions REAL, ctr REAL, position REAL
+);
+CREATE TABLE IF NOT EXISTS analytics (
+  url TEXT PRIMARY KEY,
+  sessions REAL, engaged_sessions REAL
+);
+CREATE TABLE IF NOT EXISTS pagespeed (
+  url TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  performance REAL, lcp_ms REAL, cls REAL, inp_ms REAL, ttfb_ms REAL,
+  PRIMARY KEY (url, strategy)
+);
+`;
+
+export function sakHome(): string {
+  return process.env.SAK_HOME ?? join(homedir(), '.sak');
+}
+
+export function crawlsDir(): string {
+  const dir = join(sakHome(), 'crawls');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function crawlPath(id: string): string {
+  if (!/^[\w.-]+$/.test(id)) throw new Error(`Invalid crawl id: ${id}`);
+  return join(crawlsDir(), `${id}.sqlite`);
+}
+
+export function createCrawlDb(id: string): Db {
+  const db = new Database(crawlPath(id));
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.exec(SCHEMA);
+  return db;
+}
+
+export function openCrawlDb(id: string, options: { readonly?: boolean } = {}): Db {
+  const path = crawlPath(id);
+  if (!existsSync(path)) throw new Error(`No crawl with id ${id}`);
+  const db = new Database(path, { readonly: options.readonly ?? false });
+  if (!options.readonly) {
+    db.pragma('journal_mode = WAL');
+    db.exec(SCHEMA);
+  }
+  return db;
+}
+
+export function listCrawlIds(): string[] {
+  return readdirSync(crawlsDir())
+    .filter((f) => f.endsWith('.sqlite'))
+    .map((f) => f.slice(0, -'.sqlite'.length))
+    .sort()
+    .reverse();
+}
+
+export function getMeta(db: Db, key: string): string | null {
+  const row = db.prepare('SELECT value FROM crawl_meta WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setMeta(db: Db, key: string, value: string): void {
+  db.prepare('INSERT INTO crawl_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@sak/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "better-sqlite3": "^12.0.0",
+    "cheerio": "^1.1.0",
+    "domhandler": "^5.0.3",
+    "robots-parser": "^3.0.1"
+  }
+}

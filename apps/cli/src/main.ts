@@ -1,0 +1,177 @@
+#!/usr/bin/env node
+import { parseArgs } from 'node:util';
+import { readFileSync } from 'node:fs';
+import {
+  compareCrawls, crawlOverview, exportCsv, issuesSummary, listCrawls, listIssues, openCrawlDb, resumeCrawl, startCrawl, urlInfo, withCrawl,
+  type CrawlConfig, type CrawlProgress, type ExportKind,
+} from '@sak/core';
+import { runIntegrationCommand } from './integrations.ts';
+
+const USAGE = `sak: local SEO crawler
+
+Crawling
+  sak crawl <url> [--max-urls N] [--max-depth N] [--rate N] [--concurrency N]
+                  [--include REGEX]... [--exclude REGEX]... [--user-agent UA] [--header "K: V"]...
+                  [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
+  sak resume <id>
+  sak list
+
+Results
+  sak issues <id> [--type TYPE] [--limit N]
+  sak url <id> <url>
+  sak export <id> --kind urls|issues|links --out PATH
+  sak compare <before-id> <after-id>
+  sak ui [--port N]
+
+Integrations
+  sak key set <dataforseo|pagespeed|google-client>
+  sak key status
+  sak google login
+  sak gsc <id> --property sc-domain:example.com [--days 90]
+  sak ga4 <id> --property 123456789 [--days 90]
+  sak psi <id> [--strategy mobile|desktop] [--limit 10] [--url URL]...
+  sak kw <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
+  sak backlinks <domain> [--refresh] [--yes]
+  sak rank <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
+  sak cost
+
+A crawl can be stopped with Ctrl-C and continued later with sak resume.`;
+
+function progressLine(progress: CrawlProgress) {
+  process.stderr.write(`\r\x1b[K${progress.fetched} fetched, ${progress.pending} queued  ${progress.status ?? '---'} ${progress.url.slice(0, 80)}`);
+}
+
+function stopOnInterrupt() {
+  const controller = new AbortController();
+  process.once('SIGINT', () => {
+    process.stderr.write('\nStopping after in-flight requests finish...\n');
+    controller.abort();
+  });
+  return controller.signal;
+}
+
+function printFinished(id: string) {
+  process.stderr.write('\n');
+  const { overview, summary } = withCrawl(id, (db) => ({ overview: crawlOverview(db, id), summary: issuesSummary(db) }));
+  console.log(`Crawl ${id}: ${overview.status}, ${overview.pages} internal URLs, ${overview.issues} issues`);
+  if (overview.status === 'paused') console.log(`Continue with: sak resume ${id}`);
+  for (const row of summary) console.log(`${row.severity.padEnd(8)} ${String(row.count).padStart(6)}  ${row.title} (${row.type})`);
+}
+
+async function main() {
+  const [command, ...rest] = process.argv.slice(2);
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: {
+      'max-urls': { type: 'string' }, 'max-depth': { type: 'string' }, rate: { type: 'string' }, concurrency: { type: 'string' },
+      include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true },
+      'user-agent': { type: 'string' }, header: { type: 'string', multiple: true },
+      robots: { type: 'string' }, 'robots-file': { type: 'string' },
+      'no-sitemaps': { type: 'boolean' }, 'no-external': { type: 'boolean' }, 'no-images': { type: 'boolean' },
+      type: { type: 'string' }, limit: { type: 'string' }, kind: { type: 'string' }, out: { type: 'string' }, port: { type: 'string' },
+      property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
+      location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
+    },
+  });
+
+  switch (command) {
+    case 'crawl': {
+      const startUrl = positionals[0];
+      if (!startUrl) throw new Error('Usage: sak crawl <url>');
+      const config: Partial<CrawlConfig> & { startUrl: string } = { startUrl };
+      if (values['max-urls']) config.maxUrls = Number(values['max-urls']);
+      if (values['max-depth']) config.maxDepth = Number(values['max-depth']);
+      if (values.rate) config.requestsPerSecond = Number(values.rate);
+      if (values.concurrency) config.concurrency = Number(values.concurrency);
+      if (values.include) config.include = values.include;
+      if (values.exclude) config.exclude = values.exclude;
+      if (values['user-agent']) config.userAgent = values['user-agent'];
+      if (values.header) {
+        config.headers = Object.fromEntries(values.header.map((h) => {
+          const at = h.indexOf(':');
+          if (at < 1) throw new Error(`Header must look like "Name: value": ${h}`);
+          return [h.slice(0, at).trim().toLowerCase(), h.slice(at + 1).trim()];
+        }));
+      }
+      if (values.robots === 'ignore') config.robotsMode = 'ignore';
+      if (values['robots-file']) {
+        config.robotsMode = 'custom';
+        config.customRobots = readFileSync(values['robots-file'], 'utf8');
+      }
+      if (values['no-sitemaps']) config.useSitemaps = false;
+      if (values['no-external']) config.checkExternal = false;
+      if (values['no-images']) config.checkImages = false;
+      printFinished(await startCrawl(config, { onProgress: progressLine, signal: stopOnInterrupt() }));
+      return;
+    }
+    case 'resume': {
+      if (!positionals[0]) throw new Error('Usage: sak resume <id>');
+      printFinished(await resumeCrawl(positionals[0], { onProgress: progressLine, signal: stopOnInterrupt() }));
+      return;
+    }
+    case 'list': {
+      for (const crawl of listCrawls()) console.log(`${crawl.id}  ${crawl.status}  ${crawl.pages} URLs  ${crawl.issues} issues  ${crawl.startUrl}`);
+      return;
+    }
+    case 'issues': {
+      const id = positionals[0];
+      if (!id) throw new Error('Usage: sak issues <id>');
+      withCrawl(id, (db) => {
+        if (!values.type) {
+          for (const row of issuesSummary(db)) console.log(`${row.severity.padEnd(8)} ${String(row.count).padStart(6)}  ${row.title} (${row.type})`);
+          return;
+        }
+        const page = listIssues(db, { type: values.type, limit: Number(values.limit ?? 100) });
+        for (const issue of page.items) console.log(`${issue.url}${issue.detail ? `  ${issue.detail}` : ''}`);
+        if (page.total > page.items.length) console.log(`(${page.items.length} of ${page.total})`);
+      });
+      return;
+    }
+    case 'url': {
+      if (positionals.length < 2) throw new Error('Usage: sak url <id> <url>');
+      console.log(JSON.stringify(withCrawl(positionals[0], (db) => urlInfo(db, positionals[1])), null, 2));
+      return;
+    }
+    case 'export': {
+      const kind = (values.kind ?? 'urls') as ExportKind;
+      if (!positionals[0] || !values.out || !['urls', 'issues', 'links'].includes(kind)) throw new Error('Usage: sak export <id> --kind urls|issues|links --out PATH');
+      const db = openCrawlDb(positionals[0], { readonly: true });
+      try {
+        console.log(`Wrote ${await exportCsv(db, kind, values.out)} rows to ${values.out}`);
+      } finally {
+        db.close();
+      }
+      return;
+    }
+    case 'compare': {
+      if (positionals.length < 2) throw new Error('Usage: sak compare <before-id> <after-id>');
+      const before = openCrawlDb(positionals[0], { readonly: true });
+      const after = openCrawlDb(positionals[1], { readonly: true });
+      console.log(JSON.stringify(compareCrawls(before, after), null, 2));
+      before.close();
+      after.close();
+      return;
+    }
+    case 'ui': {
+      const { startUiServer } = await import('@sak/web');
+      const { url } = await startUiServer(Number(values.port ?? 4600));
+      console.log(`SAK UI running at ${url}`);
+      return;
+    }
+    case undefined:
+    case 'help':
+    case '--help':
+      console.log(USAGE);
+      return;
+    default:
+      if (await runIntegrationCommand(command, positionals, values)) return;
+      console.error(USAGE);
+      process.exitCode = 1;
+  }
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+});
