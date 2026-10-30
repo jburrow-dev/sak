@@ -1,4 +1,4 @@
-# SAK
+# SAK [Swiss Army Knife]
 
 A local SEO crawler and data tool. It runs on your Mac, stores each crawl in its own SQLite file under `~/.sak`, and can be used from the command line, a localhost web UI, or Claude through MCP.
 
