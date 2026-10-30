@@ -32,7 +32,8 @@ export function parseHtml(html: string, pageUrl: string): PageFacts {
   const links: LinkOut[] = [];
   $('a[href]').each((_, el) => {
     const url = normalizeUrl($(el).attr('href') ?? '', base);
-    if (!url) return;
+    // Cloudflare's stand-in for an email link, which its script restores to mailto: in the browser.
+    if (!url || new URL(url).pathname === '/cdn-cgi/l/email-protection') return;
     const rel = ($(el).attr('rel') ?? '').toLowerCase();
     links.push({ url, type: 'a', anchor: clean($(el).text()).slice(0, 300), nofollow: rel.includes('nofollow') });
   });

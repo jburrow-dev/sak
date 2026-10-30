@@ -37,6 +37,16 @@ export interface RankRow {
   url: string | null;
 }
 
+/** Accepts login:password, the dashboard's Base64 token, or login:token. */
+export function dataForSeoBasicToken(credentials: string): string {
+  const at = credentials.indexOf(':');
+  const candidate = at === -1 ? credentials : credentials.slice(at + 1);
+  const decoded = Buffer.from(candidate, 'base64').toString('utf8');
+  const isToken = Buffer.from(decoded).toString('base64') === candidate && decoded.includes(':');
+  if (isToken && (at === -1 || decoded.startsWith(`${credentials.slice(0, at)}:`))) return candidate;
+  return Buffer.from(credentials).toString('base64');
+}
+
 export class DataForSeo {
   private secrets: SecretStore;
   private cache: ApiCache;
@@ -50,8 +60,8 @@ export class DataForSeo {
 
   private async authHeader(): Promise<string> {
     const credentials = await this.secrets.get('dataforseo');
-    if (!credentials?.includes(':')) throw new Error('DataForSEO is not set up. Run: sak key set dataforseo (enter login:password)');
-    return `Basic ${Buffer.from(credentials).toString('base64')}`;
+    if (!credentials) throw new Error('DataForSEO is not set up. Run: sak key set dataforseo (enter login:password)');
+    return `Basic ${dataForSeoBasicToken(credentials)}`;
   }
 
   private async post(endpoint: string, task: Record<string, unknown>): Promise<{ result: any[]; cost: number }> {
