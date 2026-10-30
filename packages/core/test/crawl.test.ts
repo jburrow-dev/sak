@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureSite } from './fixture-site.ts';
-import { compareCrawls, crawlOverview, exportCsv, issuesSummary, listIssues, listUrls, openCrawlDb, resumeCrawl, startCrawl, urlInfo, urlLinks, withCrawl, type Db } from '../src/index.ts';
+import { compareCrawls, crawlOverview, exportCsv, issuesSummary, listCrawlIds, listIssues, listUrls, openCrawlDb, resumeCrawl, startCrawl, urlInfo, urlLinks, withCrawl, type Db, type Fetcher } from '../src/index.ts';
 
 let server: Server;
 let origin: string;
@@ -174,6 +174,51 @@ describe('crawl options', () => {
     const done = withCrawl('resume', (d) => crawlOverview(d, 'resume'));
     expect(done.status).toBe('finished');
     expect(done.pending).toBe(0);
+  });
+});
+
+describe('subdomain crawling', () => {
+  // Reserved .test hosts served by a fake fetcher, since a local server has no real subdomains.
+  const site: Record<string, string> = {
+    'http://site.test/': '<a href="http://app.site.test/">app</a><a href="http://other.test/">other</a>',
+    'http://app.site.test/': '<title>App</title><a href="/inner">inner</a>',
+    'http://app.site.test/inner': '<title>Inner</title>',
+    'http://hidden.site.test/': '<title>Hidden</title><a href="/deep">deep</a>',
+    'http://hidden.site.test/deep': '<title>Deep</title>',
+    'http://other.test/': '<title>Other</title><a href="/never">never</a>',
+  };
+  const fetcher: Fetcher = {
+    async fetch({ url, readBody }) {
+      const body = site[url];
+      return { status: body ? 200 : 404, headers: new Headers({ 'content-type': 'text/html' }), body: readBody ? (body ?? '') : null, bytes: 1, elapsedMs: 1 };
+    },
+  };
+  const base = { ...fast, requestsPerSecond: 0, useSitemaps: false, robotsMode: 'custom' as const, customRobots: '' };
+  const urlsOf = (id: string, kind: string) => withCrawl(id, (d) => (d.prepare('SELECT url FROM urls WHERE kind = ? ORDER BY url').all(kind) as { url: string }[]).map((r) => r.url));
+
+  it('treats subdomains as external by default and does not parse them', async () => {
+    const id = await startCrawl({ startUrl: 'http://site.test/', ...base }, { fetcher }, 'sub-off');
+    expect(urlsOf(id, 'page')).toEqual(['http://site.test/']);
+    expect(urlsOf(id, 'external')).toEqual(['http://app.site.test/', 'http://other.test/']);
+  });
+
+  it('crawls linked subdomains when enabled, without leaving the site', async () => {
+    const id = await startCrawl({ startUrl: 'http://site.test/', ...base, crawlSubdomains: true }, { fetcher }, 'sub-on');
+    expect(urlsOf(id, 'page')).toEqual(['http://app.site.test/', 'http://app.site.test/inner', 'http://site.test/']);
+    expect(urlsOf(id, 'external')).toEqual(['http://other.test/']);
+  });
+
+  it('reaches unlinked subdomains through a seed', async () => {
+    const id = await startCrawl({ startUrl: 'http://site.test/', ...base, crawlSubdomains: true, seeds: ['http://hidden.site.test/'] }, { fetcher }, 'sub-seed');
+    expect(urlsOf(id, 'page')).toEqual(expect.arrayContaining(['http://hidden.site.test/', 'http://hidden.site.test/deep']));
+    const depth = withCrawl(id, (d) => d.prepare('SELECT depth FROM urls WHERE url = ?').get('http://hidden.site.test/deep'));
+    expect(depth).toEqual({ depth: 1 });
+  });
+
+  it('rejects a seed outside the crawl before creating anything', async () => {
+    await expect(startCrawl({ startUrl: 'http://site.test/', ...base, seeds: ['http://hidden.site.test/'] }, { fetcher }, 'sub-bad1')).rejects.toThrow('outside this crawl');
+    await expect(startCrawl({ startUrl: 'http://site.test/', ...base, crawlSubdomains: true, seeds: ['http://other.test/'] }, { fetcher }, 'sub-bad2')).rejects.toThrow('outside this crawl');
+    expect(listCrawlIds()).not.toContain('sub-bad1');
   });
 });
 

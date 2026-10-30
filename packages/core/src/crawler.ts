@@ -99,6 +99,10 @@ class Crawl {
     };
   }
 
+  private inScope(url: string): boolean {
+    return isInternal(url, this.config.startUrl, this.config.crawlSubdomains);
+  }
+
   /** Registers a URL, returning its id, or null when out of scope or over the URL budget. */
   private enqueue(url: string, depth: number | null): number | null {
     const existing = this.statements.findUrl.get(url) as { id: number } | undefined;
@@ -106,7 +110,7 @@ class Crawl {
       if (depth !== null) this.statements.updateDepth.run(depth, existing.id, depth);
       return existing.id;
     }
-    const internal = isInternal(url, this.config.startUrl);
+    const internal = this.inScope(url);
     if (internal) {
       if (!this.allowed(url)) return null;
       if (this.config.maxDepth !== null && depth !== null && depth > this.config.maxDepth) return null;
@@ -127,18 +131,21 @@ class Crawl {
   }
 
   private async seed(): Promise<void> {
-    this.enqueue(this.config.startUrl, 0);
+    const starts = [this.config.startUrl, ...this.config.seeds];
+    for (const start of starts) this.enqueue(start, 0);
     if (!this.config.useSitemaps) return;
-    const robots = await this.robots.forUrl(this.config.startUrl);
-    const origin = new URL(this.config.startUrl).origin;
-    const seeds = robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
+    const sitemaps: string[] = [];
+    for (const origin of new Set(starts.map((start) => new URL(start).origin))) {
+      const robots = await this.robots.forUrl(origin);
+      sitemaps.push(...(robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`]));
+    }
     const headers = { ...this.config.headers, 'user-agent': this.config.userAgent };
-    const { urls, files } = await collectSitemapUrls(seeds, headers, this.config.timeoutMs);
+    const { urls, files } = await collectSitemapUrls(sitemaps, headers, this.config.timeoutMs);
     setMeta(this.db, 'sitemap_files', JSON.stringify(files));
     const mark = this.db.prepare('UPDATE urls SET in_sitemap = 1 WHERE id = ?');
     this.db.transaction(() => {
       for (const url of urls) {
-        if (!isInternal(url, this.config.startUrl)) continue;
+        if (!this.inScope(url)) continue;
         const id = this.enqueue(url, null);
         if (id !== null) mark.run(id);
       }
@@ -307,6 +314,14 @@ export async function startCrawl(input: Partial<CrawlConfig> & { startUrl: strin
   if (!startUrl) throw new Error(`Not a valid http(s) URL: ${input.startUrl}`);
   const config: CrawlConfig = { ...DEFAULT_CONFIG, ...input, startUrl };
   compileFilters(config.include, config.exclude); // Fail on a bad regex before creating anything.
+  config.seeds = config.seeds.map((seed) => {
+    const url = normalizeUrl(seed);
+    if (!url) throw new Error(`Not a valid http(s) URL: ${seed}`);
+    if (!isInternal(url, startUrl, config.crawlSubdomains)) {
+      throw new Error(`Seed ${url} is outside this crawl. Start from a parent domain and use subdomain crawling.`);
+    }
+    return url;
+  });
   const crawlId = id ?? newCrawlId(startUrl);
   const db = createCrawlDb(crawlId);
   try {
@@ -326,7 +341,8 @@ export async function resumeCrawl(id: string, options: CrawlOptions = {}): Promi
     const raw = getMeta(db, 'config');
     if (!raw) throw new Error(`Crawl ${id} has no saved configuration`);
     db.prepare(`UPDATE urls SET state = 'pending' WHERE state = 'in_progress'`).run();
-    await runCrawl(id, db, JSON.parse(raw) as CrawlConfig, options);
+    // Crawls saved by an older version may lack newer settings.
+    await runCrawl(id, db, { ...DEFAULT_CONFIG, ...(JSON.parse(raw) as CrawlConfig) }, options);
   } finally {
     db.close();
   }

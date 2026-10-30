@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import {
-  compareCrawls, crawlOverview, exportCsv, issuesSummary, listCrawls, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, urlInfo, urlLinks, withCrawl,
+  compareCrawls, crawlOverview, exportCsv, isInternal, issuesSummary, listCrawls, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, urlInfo, urlLinks, withCrawl,
   type CrawlConfig,
 } from '@sak/core';
 import { dataForSeoTools } from './paid.ts';
@@ -47,6 +47,8 @@ server.registerTool('crawl_start', {
     use_sitemaps: z.boolean().optional(),
     check_external: z.boolean().optional(),
     check_images: z.boolean().optional(),
+    crawl_subdomains: z.boolean().optional().describe('Treat subdomains of the start host as part of the site'),
+    seeds: z.array(z.string()).optional().describe('Extra in-scope start URLs, for sections nothing links to'),
   },
 }, async (args) => {
   const startUrl = normalizeUrl(args.url);
@@ -62,6 +64,15 @@ server.registerTool('crawl_start', {
   if (args.use_sitemaps !== undefined) config.useSitemaps = args.use_sitemaps;
   if (args.check_external !== undefined) config.checkExternal = args.check_external;
   if (args.check_images !== undefined) config.checkImages = args.check_images;
+  if (args.crawl_subdomains !== undefined) config.crawlSubdomains = args.crawl_subdomains;
+  if (args.seeds) {
+    for (const seed of args.seeds) {
+      const url = normalizeUrl(seed);
+      if (!url) return failure(`Not a valid http(s) URL: ${seed}`);
+      if (!isInternal(url, startUrl, args.crawl_subdomains ?? false)) return failure(`Seed ${url} is outside this crawl. Start from a parent domain and set crawl_subdomains.`);
+    }
+    config.seeds = args.seeds;
+  }
   try {
     for (const pattern of [...(args.include ?? []), ...(args.exclude ?? [])]) new RegExp(pattern);
   } catch (error) {

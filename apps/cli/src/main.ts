@@ -13,6 +13,7 @@ Crawling
   sak crawl <url> [--max-urls N] [--max-depth N] [--rate N] [--concurrency N]
                   [--include REGEX]... [--exclude REGEX]... [--user-agent UA] [--header "K: V"]...
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
+                  [--subdomains] [--seed URL]...
   sak resume <id>
   sak list
 
@@ -74,7 +75,7 @@ async function main() {
       include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true },
       'user-agent': { type: 'string' }, header: { type: 'string', multiple: true },
       robots: { type: 'string' }, 'robots-file': { type: 'string' },
-      'no-sitemaps': { type: 'boolean' }, 'no-external': { type: 'boolean' }, 'no-images': { type: 'boolean' },
+      'no-sitemaps': { type: 'boolean' }, 'no-external': { type: 'boolean' }, 'no-images': { type: 'boolean' }, subdomains: { type: 'boolean' }, seed: { type: 'string', multiple: true },
       type: { type: 'string' }, limit: { type: 'string' }, kind: { type: 'string' }, out: { type: 'string' }, port: { type: 'string' },
       property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
@@ -108,6 +109,8 @@ async function main() {
       if (values['no-sitemaps']) config.useSitemaps = false;
       if (values['no-external']) config.checkExternal = false;
       if (values['no-images']) config.checkImages = false;
+      if (values.subdomains) config.crawlSubdomains = true;
+      if (values.seed) config.seeds = values.seed;
       printFinished(await startCrawl(config, { onProgress: progressLine, signal: stopOnInterrupt() }));
       return;
     }

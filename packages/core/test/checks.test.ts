@@ -5,7 +5,7 @@ import { pixelWidth } from '../src/checks/pixels.ts';
 import { computeIndexability } from '../src/analysis.ts';
 import { csvCell } from '../src/export.ts';
 import { parseHtml, parseLinkHeader } from '../src/parse.ts';
-import { compileFilters, normalizeUrl } from '../src/url.ts';
+import { compileFilters, isInternal, normalizeUrl } from '../src/url.ts';
 import type { UrlRow } from '../src/types.ts';
 
 const URL_A = 'https://example.com/a';
@@ -35,6 +35,25 @@ describe('url handling', () => {
     expect(allowed('https://x.com/blog/a')).toBe(true);
     expect(allowed('https://x.com/blog/draft')).toBe(false);
     expect(allowed('https://x.com/shop')).toBe(false);
+  });
+});
+
+describe('subdomain scope', () => {
+  const start = 'https://www.example.com/';
+  it('keeps subdomains external by default', () => {
+    expect(isInternal('https://example.com/a', start)).toBe(true);
+    expect(isInternal('https://blog.example.com/', start)).toBe(false);
+  });
+  it('includes subdomains at any depth when enabled', () => {
+    expect(isInternal('https://blog.example.com/', start, true)).toBe(true);
+    expect(isInternal('https://a.b.example.com/', start, true)).toBe(true);
+  });
+  it('does not match lookalike domains', () => {
+    expect(isInternal('https://notexample.com/', start, true)).toBe(false);
+    expect(isInternal('https://example.com.evil.net/', start, true)).toBe(false);
+  });
+  it('scopes to the start host, not its parent', () => {
+    expect(isInternal('https://example.com/', 'https://blog.example.com/', true)).toBe(false);
   });
 });
 

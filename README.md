@@ -24,6 +24,14 @@ sak compare <before-id> <after-id>
 sak ui
 ```
 
+To include subdomains, start from the parent domain. Add `--seed` for any section nothing links to:
+
+```bash
+sak crawl https://example.com --subdomains --seed https://blog.example.com/
+```
+
+Scope is based on the start URL's host, so starting from `blog.example.com` won't cover `example.com`. Without `--subdomains`, `www` and non-`www` count as one site and other subdomains are external. Sitemaps are read for the start URL and each seed, unless `--no-sitemaps` is set.
+
 Defaults: 2 requests per second per host, robots.txt respected, sitemaps read, external links and images checked, 10,000 internal URLs. Run `sak` for all options. Ctrl-C pauses a crawl, and `sak resume <id>` continues it.
 
 ## Claude (MCP)

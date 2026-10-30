@@ -16,8 +16,10 @@ export function siteHost(url: string): string {
   return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
 }
 
-export function isInternal(url: string, startUrl: string): boolean {
-  return siteHost(url) === siteHost(startUrl);
+export function isInternal(url: string, startUrl: string, crawlSubdomains = false): boolean {
+  const host = siteHost(url);
+  const site = siteHost(startUrl);
+  return host === site || (crawlSubdomains && host.endsWith(`.${site}`));
 }
 
 export function compileFilters(include: string[], exclude: string[]) {

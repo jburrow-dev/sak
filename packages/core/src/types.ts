@@ -17,6 +17,10 @@ export interface CrawlConfig {
   useSitemaps: boolean;
   checkExternal: boolean;
   checkImages: boolean;
+  /** Treat subdomains of the start URL's host as part of the site. */
+  crawlSubdomains: boolean;
+  /** Extra in-scope URLs to start from, for sections nothing links to. */
+  seeds: string[];
 }
 
 export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
@@ -35,6 +39,8 @@ export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
   useSitemaps: true,
   checkExternal: true,
   checkImages: true,
+  crawlSubdomains: false,
+  seeds: [],
 };
 
 export type UrlKind = 'page' | 'external' | 'image';
