@@ -1,4 +1,4 @@
-# SAK [Swiss Army Knife]
+# SSAK [Search Swiss Army Knife]
 
 A local SEO crawler and data tool. It runs on your Mac, stores each crawl in its own SQLite file under `~/.sak`, and can be used from the command line, a localhost web UI, or Claude through MCP.
 
@@ -41,7 +41,7 @@ To render pages in Chrome, so content and links added by JavaScript are seen, ad
 ## Claude (MCP)
 
 ```bash
-claude mcp add sak -- node /Users/jamesburrow/SAK/apps/mcp/src/main.ts
+claude mcp add sak -- node /path/to/SAK/apps/mcp/src/main.ts
 ```
 
 ## Integrations
@@ -78,15 +78,15 @@ npm test
 npm run typecheck
 ```
 
-`packages/core/test/fixture-site.ts` is a local site with known faults. To compare SAK with Screaming Frog on any site, crawl it with both, export Internal > All from Screaming Frog as NDJSON, and run:
+`packages/core/test/fixture-site.ts` is a local site with known faults. To compare SSAK with Screaming Frog on any site, crawl it with both, export Internal > All from Screaming Frog as NDJSON, and run:
 
 ```bash
 node scripts/compare-sf.ts <crawl-id> <export.ndjson>
 ```
 
 Expected differences from Screaming Frog's defaults:
-- SAK reads sitemaps, so it finds orphan pages. Screaming Frog doesn't unless configured to.
-- SAK lists scripts and CSS separately from internal URLs, so they don't count toward its internal URL total.
-- SAK detects exact duplicates from visible text, and Screaming Frog from the full HTML, so SAK also flags identical pages with different canonicals.
-- SAK reports likely JS pages as `js_dependent`, not as low content.
+- SSAK reads sitemaps, so it finds orphan pages. Screaming Frog doesn't unless configured to.
+- SSAK lists scripts and CSS separately from internal URLs, so they don't count toward its internal URL total.
+- SSAK detects exact duplicates from visible text, and Screaming Frog from the full HTML, so SSAK also flags identical pages with different canonicals.
+- SSAK reports likely JS pages as `js_dependent`, not as low content.
 - Word counts are usually within 5% of Screaming Frog's, not identical. Both leave out nav and footer, but they split words differently.
