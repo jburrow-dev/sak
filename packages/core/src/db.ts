@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type BetterSqlite3 from 'better-sqlite3';
@@ -258,6 +258,13 @@ export function openCrawlDb(id: string, options: { readonly?: boolean } = {}): D
   db.close();
   openCrawlDb(id).close();
   return new Database(path, { readonly: true });
+}
+
+/** Removes a crawl and its SQLite side files. Check that it isn't running first. */
+export function deleteCrawl(id: string): void {
+  const path = crawlPath(id);
+  if (!existsSync(path)) throw new Error(`No crawl with id ${id}`);
+  for (const suffix of ['-wal', '-shm', '']) rmSync(`${path}${suffix}`, { force: true });
 }
 
 export function listCrawlIds(): string[] {

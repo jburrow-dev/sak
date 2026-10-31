@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  compareCrawls, createCrawlDb, crawlOverview, elementCatalog, elementCounts, elementCsv, issuesSummary, getMeta, listCrawls, listElement, listIssues, listUrls, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, trafficPulls, urlInfo, urlLinks, withCrawl, writeSettings,
+  compareCrawls, createCrawlDb, crawlOverview, deleteCrawl, elementCatalog, elementCounts, elementCsv, issuesCsv, issuesSummary, getMeta, listCrawls, listElement, listIssues, listUrls, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, trafficPulls, urlInfo, urlLinks, urlsCsv, withCrawl, writeSettings,
   type CrawlConfig,
 } from '@sak/core';
 import {
@@ -234,9 +234,16 @@ async function handlePost(path: string, body: any): Promise<unknown> {
     else await removeBingKey(new KeychainStore(), resolveBingAccount(account));
     return connections();
   }
-  const match = path.match(/^\/api\/crawls\/([\w.-]+)\/(pause|resume|traffic|inspect)$/);
+  const match = path.match(/^\/api\/crawls\/([\w.-]+)\/(pause|resume|traffic|inspect|delete)$/);
   if (!match) throw badRequest('Not found', 404);
   const [, id, action] = match;
+  if (action === 'delete') {
+    if (running.has(id)) throw badRequest('Pause this crawl before deleting it.', 409);
+    // Could be interrupted, or still going in the CLI, and this process can't tell which.
+    if (withCrawl(id, (db) => getMeta(db, 'status')) === 'running') throw badRequest('This crawl may still be running in another window. If it was interrupted, resume it here and pause it, then delete it.', 409);
+    deleteCrawl(id);
+    return { id, status: 'deleted' };
+  }
   if (action === 'traffic' || action === 'inspect') {
     if (running.has(id)) throw badRequest('This crawl is still working. Wait for it to finish.', 409);
     if (withCrawl(id, (db) => getMeta(db, 'status')) !== 'finished') throw badRequest('Search and analytics data can only be added to a finished crawl.', 409);
@@ -306,21 +313,29 @@ async function handleApi(path: string, params: URLSearchParams): Promise<unknown
       : { counts: elementCounts(db, key), page: listElement(db, key, { ...query, ...paging }) }));
   }
 
-  const match = path.match(/^\/api\/crawls\/([\w.-]+)(?:\/(issues|urls|url|links|paid|traffic))?$/);
+  const urlFilter = () => ({
+    kind: params.get('kind') ?? undefined,
+    status: num(params.get('status')),
+    indexable: params.has('indexable') ? params.get('indexable') === 'true' : undefined,
+    ...sorting,
+  });
+  const issueFilter = () => ({ type: params.get('type') ?? undefined, severity: params.get('severity') ?? undefined, ...sorting });
+
+  const csv = path.match(/^\/api\/crawls\/([\w.-]+)\/(issues|urls)\.csv$/);
+  if (csv) {
+    const [, id, kind] = csv;
+    return withCrawl(id, (db) => new Download(kind === 'issues' ? issuesCsv(db, issueFilter()) : urlsCsv(db, urlFilter()), `${id}-${kind}.csv`));
+  }
+
+  const match = path.match(/^\/api\/crawls\/([\w.-]+)(?:\/(issues|urls|url|links|paid|traffic|config))?$/);
   if (!match) throw badRequest('Not found', 404);
   const [, id, section] = match;
   return withCrawl(id, (db) => {
     switch (section) {
       case 'issues':
-        return listIssues(db, { type: params.get('type') ?? undefined, severity: params.get('severity') ?? undefined, ...sorting, ...paging });
+        return listIssues(db, { ...issueFilter(), ...paging });
       case 'urls':
-        return listUrls(db, {
-          kind: params.get('kind') ?? undefined,
-          status: num(params.get('status')),
-          indexable: params.has('indexable') ? params.get('indexable') === 'true' : undefined,
-          ...sorting,
-          ...paging,
-        });
+        return listUrls(db, { ...urlFilter(), ...paging });
       case 'url':
         return urlInfo(db, params.get('url') ?? '');
       case 'links':
@@ -329,6 +344,8 @@ async function handleApi(path: string, params: URLSearchParams): Promise<unknown
         return readPaidData(db);
       case 'traffic':
         return { pulls: trafficPulls(db), plan: readTrafficPlan(db), subdomains: Boolean((JSON.parse(getMeta(db, 'config') ?? '{}') as Partial<CrawlConfig>).crawlSubdomains) };
+      case 'config':
+        return { config: JSON.parse(getMeta(db, 'config') ?? '{}') as Partial<CrawlConfig>, traffic: readTrafficPlan(db) };
       default:
         return { overview: { ...crawlOverview(db, id), running: running.has(id) }, summary: issuesSummary(db) };
     }

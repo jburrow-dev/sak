@@ -1,7 +1,7 @@
 import { createWriteStream } from 'node:fs';
 import { finished } from 'node:stream/promises';
 import type { Db } from './db.ts';
-import { listUrls } from './query.ts';
+import { listIssues, listUrls, type Page } from './query.ts';
 
 export type ExportKind = 'urls' | 'issues' | 'links';
 
@@ -11,6 +11,29 @@ export function csvCell(value: unknown): string {
   // Stops page-controlled text from running as a formula when the CSV opens in a spreadsheet.
   if (/^[=+\-@\t\r]/.test(text) && !/^-?\d/.test(text)) text = `'${text}`;
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+const URL_COLUMNS = ['url', 'kind', 'status', 'depth', 'indexable', 'indexability_reason', 'redirect_target', 'title', 'meta_description', 'h1', 'canonical', 'word_count', 'inlinks', 'in_sitemap', 'response_ms', 'issue_count', 'clicks', 'impressions', 'ctr', 'position', 'sessions', 'engaged_sessions', 'users', 'views', 'key_events', 'bing_clicks', 'bing_impressions', 'bing_position', 'error', 'blocked_reason'] as const;
+const ISSUE_COLUMNS = ['type', 'severity', 'url', 'detail'] as const;
+const PAGE_SIZE = 1000;
+
+function pagedCsv(columns: readonly string[], load: (limit: number, offset: number) => Page<object>): string {
+  const lines = [columns.map(csvCell).join(',')];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { items } = load(PAGE_SIZE, offset);
+    for (const item of items) lines.push(columns.map((column) => csvCell((item as Record<string, unknown>)[column])).join(','));
+    if (items.length < PAGE_SIZE) break;
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/** The filtered view the UI is showing, unlike exportCsv, which writes everything to a file. */
+export function issuesCsv(db: Db, filter: Parameters<typeof listIssues>[1] = {}): string {
+  return pagedCsv(ISSUE_COLUMNS, (limit, offset) => listIssues(db, { ...filter, limit, offset }));
+}
+
+export function urlsCsv(db: Db, filter: Parameters<typeof listUrls>[1] = {}): string {
+  return pagedCsv(URL_COLUMNS, (limit, offset) => listUrls(db, { ...filter, limit, offset }));
 }
 
 function* rows(db: Db, kind: ExportKind): Generator<unknown[]> {
@@ -23,13 +46,11 @@ function* rows(db: Db, kind: ExportKind): Generator<unknown[]> {
       JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id LEFT JOIN responses r ON r.url_id = t.id`;
     for (const r of db.prepare(sql).iterate() as Iterable<any>) yield [r.source, r.target, r.type, r.anchor, r.nofollow, r.status];
   } else {
-    const columns = ['url', 'kind', 'status', 'depth', 'indexable', 'indexability_reason', 'redirect_target', 'title', 'meta_description', 'h1', 'canonical', 'word_count', 'inlinks', 'in_sitemap', 'response_ms', 'issue_count', 'clicks', 'impressions', 'ctr', 'position', 'sessions', 'engaged_sessions', 'users', 'views', 'key_events', 'bing_clicks', 'bing_impressions', 'bing_position', 'error', 'blocked_reason'] as const;
-    yield [...columns];
-    const pageSize = 1000;
-    for (let offset = 0; ; offset += pageSize) {
-      const { items } = listUrls(db, { limit: pageSize, offset });
-      for (const item of items) yield columns.map((c) => item[c]);
-      if (items.length < pageSize) break;
+    yield [...URL_COLUMNS];
+    for (let offset = 0; ; offset += PAGE_SIZE) {
+      const { items } = listUrls(db, { limit: PAGE_SIZE, offset });
+      for (const item of items) yield URL_COLUMNS.map((c) => item[c]);
+      if (items.length < PAGE_SIZE) break;
     }
   }
 }

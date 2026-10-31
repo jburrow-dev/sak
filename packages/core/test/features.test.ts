@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureSite } from './fixture-site.ts';
 import {
-  Database, RenderingFetcher, crawlPath, createCrawlDb, elementCatalog, elementCounts, elementCsv, listElement, listIssues, listUrls, openCrawlDb, readSettings, startCrawl, urlInfo, withCrawl, writeSettings,
+  Database, RenderingFetcher, crawlPath, createCrawlDb, deleteCrawl, elementCatalog, elementCounts, elementCsv, issuesCsv, listCrawlIds, listElement, listIssues, listUrls, openCrawlDb, readSettings, startCrawl, urlInfo, urlsCsv, withCrawl, writeSettings,
   type Db, type Fetcher, type Renderer,
 } from '../src/index.ts';
 
@@ -232,5 +232,39 @@ describe('settings', () => {
     const fresh = createCrawlDb('fresh');
     expect(fresh.pragma('user_version', { simple: true })).toBeGreaterThan(0);
     fresh.close();
+  });
+});
+
+describe('filtered CSV exports', () => {
+  it('exports every issue the filter matches', () => {
+    const type = listIssues(db, { limit: 1 }).items[0].type;
+    const lines = issuesCsv(db, { type }).trim().split('\n');
+    expect(lines[0]).toBe('type,severity,url,detail');
+    expect(lines.length - 1).toBe(listIssues(db, { type }).total);
+    expect(lines.slice(1).every((line) => line.startsWith(`${type},`))).toBe(true);
+  });
+
+  it('applies the URL filters', () => {
+    const total = listUrls(db, { kind: 'page' }).total;
+    const lines = urlsCsv(db, { kind: 'page' }).trim().split('\n');
+    expect(lines[0].startsWith('url,kind,status')).toBe(true);
+    expect(lines.length - 1).toBe(total);
+  });
+});
+
+describe('deleteCrawl', () => {
+  it('removes the crawl and its side files', () => {
+    createCrawlDb('to-delete').close();
+    new Database(crawlPath('to-delete')).close();
+    deleteCrawl('to-delete');
+    expect(listCrawlIds()).not.toContain('to-delete');
+    expect(existsSync(crawlPath('to-delete'))).toBe(false);
+    expect(existsSync(`${crawlPath('to-delete')}-wal`)).toBe(false);
+    expect(existsSync(`${crawlPath('to-delete')}-shm`)).toBe(false);
+  });
+
+  it('refuses ids that could leave the crawls folder, and ones that do not exist', () => {
+    expect(() => deleteCrawl('../settings')).toThrow(/Invalid crawl id/);
+    expect(() => deleteCrawl('never-existed')).toThrow(/No crawl/);
   });
 });

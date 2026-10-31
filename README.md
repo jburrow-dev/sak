@@ -36,7 +36,7 @@ Defaults: 2 requests per second per host, robots.txt respected, sitemaps read, e
 
 To render pages in Chrome, so content and links added by JavaScript are seen, add `--render`. It uses your installed Google Chrome with a throwaway profile, and is slower because each page is fetched and then rendered. Common analytics and ad requests are blocked, so crawling doesn't add visits to a site's reports. Results show what changed between the HTML as served and the rendered page.
 
-`sak ui` can also start, pause and resume crawls, and connect Google and Bing. Its Elements tab browses pages by SEO element, with filters such as duplicate titles or missing H1s, and exports any view to CSV.
+`sak ui` can also start, pause, resume, re-run and delete crawls, and connect Google and Bing. Its Elements tab browses pages by SEO element, with filters such as duplicate titles or missing H1s, and exports any view to CSV.
 
 ## Claude (MCP)
 
@@ -59,7 +59,7 @@ DataForSEO calls are cached for good and only re-fetched with `--refresh`. A cal
 
 A crawl on its own never spends. To store paid data with a crawl, turn it on in the New crawl form, or add `--backlinks`, or `--keywords "a,b"` with `--volume` and `--rank`, plus `--yes`. It runs once the crawl finishes.
 
-`sak paid off`, or the switch in the UI's Costs tab, stops all DataForSEO calls from the CLI, the UI and Claude. Cached results still work.
+`sak paid off`, or the switch on the UI's Usage screen, stops all DataForSEO calls from the CLI, the UI and Claude. Cached results still work.
 
 Two limits also apply, and a request over either one is refused before you're asked to confirm it: $5 per run and $50 per calendar month. See or change them with `sak budget --run 10 --monthly 100`. Claude can read them but not change them. They compare SAK's estimates and its own spend records, so they don't see spending outside SAK.
 
@@ -125,7 +125,7 @@ Without the Admin API, SAK can't list GA4 properties, but you can still type a n
 
 **Bing setup:** create a key in Bing Webmaster Tools under Settings, then API Access, and add it in the Connections screen or with `sak bing key add --label NAME`. Add one key per Bing login. Bing OAuth isn't supported yet.
 
-**To add or change data on a finished crawl**, use the UI's coverage table above the tabs, or:
+**To add or change data on a finished crawl**, use **Change date range or sources** above the UI's tabs, or:
 
 ```bash
 sak traffic <crawl-id> --days 60

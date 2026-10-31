@@ -122,12 +122,14 @@ export function TrafficFields({ url, subdomains, initial, onChange, onConnection
   const nothingConnected = googleAccounts.length === 0 && connections.bing.accounts.length === 0;
   return (
     <>
-      <div className="range-row">
-        <span>Date range</span>
-        <div className="segments" role="group" aria-label="Date range">
-          {connections.days.map((value) => <button type="button" key={value} aria-pressed={days === value} onClick={() => setDays(value)}>{value} days</button>)}
+      {(gsc.on || ga4.on || bing.on) && (
+        <div className="range-row">
+          <span>Date range</span>
+          <div className="segments" role="group" aria-label="Date range">
+            {connections.days.map((value) => <button type="button" key={value} aria-pressed={days === value} onClick={() => setDays(value)}>{value} days</button>)}
+          </div>
         </div>
-      </div>
+      )}
       <SourcePicker source="gsc" label="Google Search Console" accounts={googleAccounts} url={debouncedUrl} subdomains={subdomains} manualLabel="Property, such as sc-domain:example.com" initial={initial?.gsc} onChange={(choice, on) => setGsc({ choice, on })}>
         <Check checked={topQueries} onChange={setTopQueries} note="Slower on large sites. Keeps the top 10 queries per page.">Top queries per page</Check>
         <Check checked={inspect} onChange={setInspect} note={`Google index status for each page. Google allows ${connections.inspections.max.toLocaleString('en-US')} a day per property.`}>URL Inspection</Check>
@@ -136,14 +138,17 @@ export function TrafficFields({ url, subdomains, initial, onChange, onConnection
       <SourcePicker source="ga4" label="Google Analytics 4" accounts={googleAccounts} url={debouncedUrl} subdomains={subdomains} manualLabel="Numeric GA4 property ID" initial={initial?.ga4} onChange={(choice, on) => setGa4({ choice, on })} />
       <SourcePicker source="bing" label="Bing Webmaster Tools" accounts={connections.bing.accounts} url={debouncedUrl} subdomains={subdomains} manualLabel="Site URL, such as https://www.example.com/" initial={initial?.bing && { account: initial.bing.account, property: initial.bing.site }} onChange={(choice, on) => setBing({ choice, on })} />
       {bing.on && <small className="subtle">Bing doesn't take a date range and updates weekly, so its range can be approximate. Results show the period it actually covers.</small>}
-      {nothingConnected && <button type="button" className="btn" style={{ width: 'fit-content' }} onClick={onConnections}>Set up connections</button>}
+      {nothingConnected && <button type="button" className="btn fit" onClick={onConnections}>Set up connections</button>}
     </>
   );
 }
 
+const noData = (pull: Pull) => pull.status === 'ok' && pull.source !== 'url_inspection' && pull.row_count === 0;
+
 function pullSummary(pull: Pull): string {
   if (pull.source === 'url_inspection') return pull.note ?? '';
   const period = pull.days && pull.start_date ? `${pull.days} days (${pull.start_date} to ${pull.end_date})` : pull.end_date ? `Bing's reported period, to ${pull.end_date}` : "Bing's reported period";
+  if (noData(pull)) return `No data returned for ${period}.`;
   const notInCrawl = pull.row_count - pull.matched - pull.dropped;
   return `${period}. ${pull.matched.toLocaleString('en-US')} of ${pull.row_count.toLocaleString('en-US')} rows match crawled pages${notInCrawl > 0 ? `, ${notInCrawl.toLocaleString('en-US')} not in crawl` : ''}${pull.dropped > 0 ? `, ${pull.dropped.toLocaleString('en-US')} outside this crawl's scope` : ''}.`;
 }
@@ -164,31 +169,41 @@ export function TrafficStrip({ crawl, overview, refresh, onChanged, onConnection
     setError(null);
     post(`/api/crawls/${crawl}/inspect`, {}).then(onChanged, (e) => setError(e.message));
   };
+  const empty = data.pulls.filter(noData).length;
+  const failed = data.pulls.filter((pull) => pull.status !== 'ok').length;
   return (
     <div className="traffic-strip">
       {data.pulls.length > 0 && (
-        <div className="panel"><table>
-          <thead><tr><th>Source</th><th>Property</th><th>Coverage</th></tr></thead>
-          <tbody>{data.pulls.map((pull) => (
-            <tr key={pull.source}>
-              <td>{SOURCE_LABELS[pull.source] ?? pull.source}</td>
-              <td className="url">{pull.property}{pull.account ? <small className="subtle" style={{ display: 'block' }}>{accountName(pull.account)}</small> : null}</td>
-              <td>
-                {pull.status === 'ok' && <span>{pullSummary(pull)}</span>}
-                {pull.status === 'ok' && pull.source !== 'url_inspection' && pull.note && <small className="subtle" style={{ display: 'block' }}>{pull.note}</small>}
-                {pull.error && <span className="status-bad" style={{ display: 'block' }}>{pull.status === 'ok' ? 'The last refresh failed, so this is earlier data: ' : ''}{pull.error}</span>}
-                {pull.source === 'url_inspection' && pull.status === 'ok' && !overview.running && <button className="btn" onClick={inspectMore}>Inspect more</button>}
-              </td>
-            </tr>
-          ))}</tbody>
-        </table></div>
+        <details>
+          <summary>
+            {data.pulls.length} data source{data.pulls.length === 1 ? '' : 's'}
+            {empty > 0 && <span className="status-warn"> · {empty} returned no data</span>}
+            {failed > 0 && <span className="status-bad"> · {failed} failed</span>}
+            <span className="subtle"> · Details</span>
+          </summary>
+          <div className="panel"><table>
+            <thead><tr><th>Source</th><th>Property</th><th>Coverage</th></tr></thead>
+            <tbody>{data.pulls.map((pull) => (
+              <tr key={pull.source}>
+                <td>{SOURCE_LABELS[pull.source] ?? pull.source}</td>
+                <td className="url">{pull.property}{pull.account ? <small className="subtle block">{accountName(pull.account)}</small> : null}</td>
+                <td>
+                  {pull.status === 'ok' && <span className={noData(pull) ? 'status-warn' : undefined}>{pullSummary(pull)}</span>}
+                  {pull.status === 'ok' && pull.source !== 'url_inspection' && pull.note && <small className="subtle block">{pull.note}</small>}
+                  {pull.error && <span className="status-bad block">{pull.status === 'ok' ? 'The last refresh failed, so this is earlier data: ' : ''}{pull.error}</span>}
+                  {pull.source === 'url_inspection' && pull.status === 'ok' && !overview.running && <button className="btn inline-action" onClick={inspectMore}>Inspect more</button>}
+                </td>
+              </tr>
+            ))}</tbody>
+          </table></div>
+        </details>
       )}
       <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
         <summary>{data.pulls.length > 0 ? 'Change date range or sources' : 'Add search and analytics data'}</summary>
         {open && (
           <form className="panel traffic-form" onSubmit={submit}>
             <TrafficFields url={overview.startUrl ?? ''} subdomains={data.subdomains} initial={data.plan} onChange={setForm} onConnections={onConnections} />
-            <button className="btn primary" style={{ width: 'fit-content' }} disabled={!form?.ready || overview.running}>Pull data</button>
+            <button className="btn primary fit" disabled={!form?.ready || overview.running}>Pull data</button>
           </form>
         )}
       </details>
@@ -238,14 +253,14 @@ export function ConnectionsView() {
       reload();
     }, (e) => setAction(e.message));
   };
-  const disconnect = (provider: 'google' | 'bing', account: string) => run(post(`/api/connections/${provider}/${encodeURIComponent(account)}/disconnect`, {}));
+  const disconnect = (provider: 'google' | 'bing', account: string) => window.confirm(`Remove ${accountName(account)}? You'd need to ${provider === 'google' ? 'sign in' : 'add the key'} again to use it.`) && run(post(`/api/connections/${provider}/${encodeURIComponent(account)}/disconnect`, {}));
   const signIn = data.google.signIn;
   const showClientForm = !data.google.clientConfigured || editingClient;
 
   return (
     <div className="connections">
       <h1>Connections</h1>
-      <p className="subtle">Credentials stay in your Mac's Keychain. SAK only asks for read access to these services.</p>
+      <p className="subtle">Credentials stay in your Mac's Keychain. SSAK only asks for read access to these services.</p>
       <div className="panel connection-group">
         <h3>Google (Search Console and GA4)</h3>
         {showClientForm ? (
@@ -267,7 +282,7 @@ export function ConnectionsView() {
             {data.google.accounts.length === 0 && <p className="subtle">No accounts connected yet.</p>}
             {data.google.accounts.map((account) => (
               <div className="connection-row" key={account}>
-                <span>{accountName(account)}{account === 'default' && <small className="subtle" style={{ display: 'block' }}>Sign in again to name this account. That replaces this entry.</small>}</span>
+                <span>{accountName(account)}{account === 'default' && <small className="subtle block">Sign in again to name this account. That replaces this entry.</small>}</span>
                 <button className="btn" onClick={() => disconnect('google', account)}>Disconnect</button>
               </div>
             ))}
@@ -288,7 +303,7 @@ export function ConnectionsView() {
           <div className="connection-row" key={account}><span>{account}</span><button className="btn" onClick={() => disconnect('bing', account)}>Remove</button></div>
         ))}
         <form onSubmit={saveBing}>
-          <p className="subtle">Create a key in Bing Webmaster Tools under Settings, then API Access. SAK checks it before saving. Add one for each Bing login you use.</p>
+          <p className="subtle">Create a key in Bing Webmaster Tools under Settings, then API Access. SSAK checks it before saving. Add one for each Bing login you use.</p>
           <div className="field-row">
             <div className="field"><label htmlFor="bing-label">Name for this key</label><input id="bing-label" type="text" autoComplete="off" value={label} onChange={(e) => setLabel(e.target.value)} /></div>
             <div className="field"><label htmlFor="bing-key">API key</label><input id="bing-key" type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} /></div>
