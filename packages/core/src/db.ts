@@ -111,24 +111,51 @@ CREATE TABLE IF NOT EXISTS paid_data (
   fetched_at TEXT NOT NULL,
   PRIMARY KEY (kind, key)
 );
+CREATE TABLE IF NOT EXISTS bing_webmaster (
+  url TEXT PRIMARY KEY,
+  clicks REAL, impressions REAL, click_position REAL, impression_position REAL, source_url TEXT
+);
+CREATE TABLE IF NOT EXISTS traffic_pulls (
+  source TEXT PRIMARY KEY,
+  account TEXT, property TEXT, days INTEGER, start_date TEXT, end_date TEXT, fetched_at TEXT NOT NULL,
+  status TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0, matched INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0,
+  note TEXT, error TEXT
+);
+CREATE TABLE IF NOT EXISTS gsc_queries (
+  url TEXT NOT NULL,
+  query TEXT NOT NULL,
+  clicks REAL, impressions REAL, ctr REAL, position REAL,
+  PRIMARY KEY (url, query)
+);
+CREATE TABLE IF NOT EXISTS url_inspection (
+  url TEXT PRIMARY KEY,
+  verdict TEXT, coverage_state TEXT, indexing_state TEXT, robots_state TEXT, page_fetch_state TEXT, last_crawl_time TEXT,
+  google_canonical TEXT, user_canonical TEXT, error TEXT, fetched_at TEXT NOT NULL
+);
 `;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
-// h2s stays NULL on crawls saved before it existed, so they don't read as "no H2" on every page.
-const ADDED_PAGE_COLUMNS: Record<string, string> = {
-  h2s: 'TEXT',
-  rendered: 'INTEGER NOT NULL DEFAULT 0',
-  raw_word_count: 'INTEGER',
-  js_only_links: 'INTEGER',
-  render_error: 'TEXT',
+const ADDED_COLUMNS: Record<string, Record<string, string>> = {
+  // h2s stays NULL on crawls saved before it existed, so they don't read as "no H2" on every page.
+  page_elements: {
+    h2s: 'TEXT',
+    rendered: 'INTEGER NOT NULL DEFAULT 0',
+    raw_word_count: 'INTEGER',
+    js_only_links: 'INTEGER',
+    render_error: 'TEXT',
+  },
+  search_console: { source_url: 'TEXT' },
+  analytics: { users: 'REAL', views: 'REAL', key_events: 'REAL', source_url: 'TEXT' },
 };
 
 function migrate(db: Db): void {
   db.exec(SCHEMA);
-  const existing = new Set((db.pragma('table_info(page_elements)') as { name: string }[]).map((c) => c.name));
-  for (const [name, type] of Object.entries(ADDED_PAGE_COLUMNS)) {
-    if (!existing.has(name)) db.exec(`ALTER TABLE page_elements ADD COLUMN ${name} ${type}`);
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    const existing = new Set((db.pragma(`table_info(${table})`) as { name: string }[]).map((c) => c.name));
+    for (const [name, type] of Object.entries(columns)) {
+      if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
   }
   db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
@@ -187,4 +214,8 @@ export function getMeta(db: Db, key: string): string | null {
 
 export function setMeta(db: Db, key: string, value: string): void {
   db.prepare('INSERT INTO crawl_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
+
+export function deleteMeta(db: Db, key: string): void {
+  db.prepare('DELETE FROM crawl_meta WHERE key = ?').run(key);
 }

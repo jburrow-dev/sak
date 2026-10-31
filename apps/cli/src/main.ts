@@ -5,8 +5,8 @@ import {
   compareCrawls, crawlOverview, createCrawlDb, exportCsv, issuesSummary, listCrawls, listIssues, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, urlInfo, withCrawl,
   type CrawlConfig, type CrawlProgress, type ExportKind,
 } from '@sak/core';
-import { PaidApisDisabled, emptyPlan, estimatePlan, savePaidPlan, type PaidPlan } from '@sak/integrations';
-import { printPaidData, runIntegrationCommand, runPaidPlan } from './integrations.ts';
+import { PaidApisDisabled, emptyPlan, estimatePlan, savePaidPlan, saveTrafficPlan, type PaidPlan } from '@sak/integrations';
+import { printPaidData, runIntegrationCommand, runPaidPlan, runTraffic, trafficPlanFromFlags } from './integrations.ts';
 
 const USAGE = `sak: local SEO crawler
 
@@ -16,6 +16,8 @@ Crawling
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
                   [--no-resources] [--render] [--subdomains] [--seed URL]...
                   [--backlinks] [--keywords "a,b" --volume --rank] [--yes]
+                  [--gsc PROPERTY] [--ga4 ID] [--bing SITE] [--days 30|60|90] [--account EMAIL] [--bing-key NAME]
+                  [--top-queries] [--inspect N]
   sak resume <id>
   sak list
 
@@ -29,9 +31,16 @@ Results
 Integrations
   sak key set <dataforseo|pagespeed|google-client>
   sak key status
+  sak connections
   sak google login
-  sak gsc <id> --property sc-domain:example.com [--days 90]
-  sak ga4 <id> --property 123456789 [--days 90]
+  sak google logout --account EMAIL
+  sak bing key add --label NAME
+  sak bing key remove --label NAME
+  sak properties <gsc|ga4|bing> [--account NAME] [--url URL]
+  sak traffic <id> [--days 30|60|90] [--gsc PROPERTY] [--ga4 ID] [--bing SITE] [--account EMAIL] [--bing-key NAME] [--top-queries] [--inspect N]
+  sak inspect <id> [--limit 500]
+  sak gsc <id> --property sc-domain:example.com [--days 90] [--account EMAIL]
+  sak ga4 <id> --property 123456789 [--days 90] [--account EMAIL]
   sak psi <id> [--strategy mobile|desktop] [--limit 10] [--url URL]...
   sak kw <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
   sak backlinks <domain> [--refresh] [--yes]
@@ -40,7 +49,8 @@ Integrations
   sak paid [on|off]
 
 A crawl can be stopped with Ctrl-C and continued later with sak resume.
---backlinks, --volume and --rank collect paid DataForSEO data once the crawl finishes.`;
+--backlinks, --volume and --rank collect paid DataForSEO data once the crawl finishes.
+--gsc, --ga4 and --bing collect free search and analytics data once the crawl finishes, over 30 days by default.`;
 
 function progressLine(progress: CrawlProgress) {
   process.stderr.write(`\r\x1b[K${progress.fetched} fetched, ${progress.pending} queued  ${progress.status ?? '---'} ${progress.url.slice(0, 80)}`);
@@ -84,6 +94,7 @@ async function main() {
       type: { type: 'string' }, limit: { type: 'string' }, kind: { type: 'string' }, out: { type: 'string' }, port: { type: 'string' },
       property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
+      gsc: { type: 'string' }, ga4: { type: 'string' }, bing: { type: 'string' }, account: { type: 'string' }, 'bing-key': { type: 'string' }, 'top-queries': { type: 'boolean' }, inspect: { type: 'string' }, label: { type: 'string' },
     },
   });
 
@@ -127,6 +138,7 @@ async function main() {
         location: values.location ? Number(values.location) : undefined,
         language: values.language,
       };
+      const traffic = await trafficPlanFromFlags(values);
       const id = newCrawlId(resolved.startUrl);
       if (!emptyPlan(plan)) {
         if (!readSettings().paidApis) throw new PaidApisDisabled();
@@ -138,9 +150,15 @@ async function main() {
         savePaidPlan(db, plan);
         db.close();
       }
+      if (traffic) {
+        const db = createCrawlDb(id);
+        saveTrafficPlan(db, traffic);
+        db.close();
+      }
       printFinished(await startCrawl(resolved, { onProgress: progressLine, signal: stopOnInterrupt() }, id));
       await runPaidPlan(id);
       printPaidData(id);
+      await runTraffic(id);
       return;
     }
     case 'resume': {
@@ -148,6 +166,7 @@ async function main() {
       printFinished(await resumeCrawl(positionals[0], { onProgress: progressLine, signal: stopOnInterrupt() }));
       await runPaidPlan(positionals[0]);
       printPaidData(positionals[0]);
+      await runTraffic(positionals[0]);
       return;
     }
     case 'list': {

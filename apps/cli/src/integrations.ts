@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
-import { openCrawlDb, readSettings, withCrawl, writeSettings } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, googleLogin, importAnalytics, importSearchConsole, pagesForSpeedTest, readPaidData, runPageSpeed, runSavedPaidPlan } from '@sak/integrations';
+import { getMeta, openCrawlDb, readSettings, trafficPulls, withCrawl, writeSettings, type Db } from '@sak/core';
+import { ApiCache, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, KeychainStore, addBingKey, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAnalytics, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
 
 const KEYS: Record<string, string> = {
   dataforseo: 'DataForSEO login:password',
@@ -38,6 +38,37 @@ export function printPaidData(id: string): void {
   }
 }
 
+/** Null when the flags ask for no search or analytics data. Fails early if an account isn't connected. */
+export async function trafficPlanFromFlags(values: Record<string, any>, fallback?: TrafficPlan | null): Promise<TrafficPlan | null> {
+  const account = values.account;
+  const plan = parseTrafficPlan({
+    days: values.days ?? fallback?.days ?? 30,
+    ...(values.gsc ? { gsc: { account, property: values.gsc, topQueries: values['top-queries'], ...(values.inspect ? { inspect: { limit: values.inspect } } : {}) } } : {}),
+    ...(values.ga4 ? { ga4: { account, property: values.ga4 } } : {}),
+    ...(values.bing ? { bing: { account: values['bing-key'], site: values.bing } } : {}),
+  });
+  const chosen = emptyTrafficPlan(plan) && fallback ? { ...fallback, days: plan.days } : plan;
+  return emptyTrafficPlan(chosen) ? null : resolveTrafficPlan(new KeychainStore(), chosen);
+}
+
+export function printTraffic(db: Db): void {
+  for (const pull of trafficPulls(db)) {
+    const period = pull.days && pull.start_date ? `${pull.start_date} to ${pull.end_date}` : 'period chosen by the service';
+    if (pull.status === 'ok') console.log(`${pull.source.padEnd(14)} ${period}, ${pull.matched} of ${pull.row_count} rows match, ${pull.dropped} outside this crawl${pull.note ? `. ${pull.note}` : ''}`);
+    if (pull.error) console.log(`${pull.source.padEnd(14)} ${pull.status === 'ok' ? 'Last refresh failed, showing earlier data: ' : 'Failed: '}${pull.error}`);
+  }
+}
+
+export async function runTraffic(id: string): Promise<void> {
+  const db = openCrawlDb(id);
+  try {
+    await runSavedTrafficPlan(db, new KeychainStore());
+    printTraffic(db);
+  } finally {
+    db.close();
+  }
+}
+
 export async function runIntegrationCommand(command: string, positionals: string[], values: Record<string, any>): Promise<boolean> {
   const secrets = new KeychainStore();
   const where = { location: Number(values.location ?? 2840), language: values.language ?? 'en' };
@@ -62,7 +93,10 @@ export async function runIntegrationCommand(command: string, positionals: string
     case 'key': {
       if (positionals[0] === 'status') {
         for (const [name, label] of Object.entries(KEYS)) console.log(`${(await secrets.get(name)) ? 'set    ' : 'not set'}  ${name} (${label})`);
-        console.log(`${(await secrets.get('google-tokens')) ? 'set    ' : 'not set'}  Google sign-in`);
+        const google = await googleAccounts(secrets);
+        console.log(`${google.length ? 'set    ' : 'not set'}  Google sign-in${google.length ? ` (${google.join(', ')})` : ''}`);
+        const bing = readConnections().bing;
+        console.log(`${bing.length ? 'set    ' : 'not set'}  Bing API key${bing.length ? ` (${bing.join(', ')})` : ''}`);
         return true;
       }
       const name = positionals[1];
@@ -74,12 +108,80 @@ export async function runIntegrationCommand(command: string, positionals: string
       return true;
     }
     case 'google': {
-      if (positionals[0] !== 'login') throw new Error('Usage: sak google login');
-      await googleLogin(secrets, (url) => {
+      if (positionals[0] === 'logout') {
+        if (!values.account) throw new Error('Usage: sak google logout --account EMAIL');
+        await disconnectGoogle(secrets, values.account);
+        console.log(`Disconnected ${values.account}.`);
+        return true;
+      }
+      if (positionals[0] !== 'login') throw new Error('Usage: sak google login | sak google logout --account EMAIL');
+      const account = await googleLogin(secrets, (url) => {
         console.log('Opening your browser to sign in to Google...');
         execFile('open', [url]);
       });
-      console.log('Signed in to Google.');
+      console.log(`Signed in to Google as ${account}.`);
+      return true;
+    }
+    case 'bing': {
+      if (positionals[0] !== 'key' || !['add', 'remove'].includes(positionals[1]) || !values.label) throw new Error('Usage: sak bing key add|remove --label NAME');
+      if (positionals[1] === 'remove') {
+        await removeBingKey(secrets, values.label);
+        console.log(`Removed the Bing key ${values.label}.`);
+        return true;
+      }
+      const key = await promptHidden('Bing Webmaster API key');
+      if (!key) throw new Error('Nothing entered, so nothing was saved');
+      const { sites } = await addBingKey(secrets, values.label, key);
+      console.log(`Saved ${values.label} to the Keychain. It can see ${sites} sites.`);
+      return true;
+    }
+    case 'connections': {
+      const google = await googleAccounts(secrets);
+      console.log(`Google client  ${(await secrets.get('google-client')) ? 'set' : 'not set'}`);
+      console.log(`Google         ${google.join(', ') || 'none'}`);
+      console.log(`Bing           ${readConnections().bing.join(', ') || 'none'}`);
+      return true;
+    }
+    case 'properties': {
+      const source = positionals[0] as TrafficSource;
+      const load: Record<string, () => Promise<PropertyOption[]>> = {
+        gsc: () => listSearchConsoleProperties(secrets, values.account),
+        ga4: () => listAnalyticsProperties(secrets, values.account),
+        bing: () => listBingSites(secrets, values.account),
+      };
+      if (!load[source]) throw new Error('Usage: sak properties <gsc|ga4|bing> [--account NAME] [--url URL]');
+      const options = await load[source]();
+      const suggested = values.url?.[0] ? suggestProperty(source, options, values.url[0]) : null;
+      for (const option of options) {
+        const notes = [option.id === suggested ? 'suggested' : '', values.url?.[0] && !propertyCovers(option.id, values.url[0]) ? 'may not cover this URL' : ''].filter(Boolean);
+        console.log(`${option.id}${option.label === option.id ? '' : `  ${option.label}`}${notes.length ? `  (${notes.join(', ')})` : ''}`);
+      }
+      return true;
+    }
+    case 'traffic': {
+      if (!positionals[0]) throw new Error('Usage: sak traffic <id> [--days 30|60|90] [--gsc PROPERTY] [--ga4 ID] [--bing SITE]');
+      const db = openCrawlDb(positionals[0]);
+      try {
+        if (getMeta(db, 'status') !== 'finished') throw new Error('Search and analytics data can only be added to a finished crawl.');
+        const plan = await trafficPlanFromFlags(values, readTrafficPlan(db));
+        if (!plan) throw new Error('This crawl has no saved sources, so choose at least one of --gsc, --ga4 or --bing.');
+        saveTrafficPlan(db, plan);
+        await runTrafficPlan(db, secrets, plan);
+        printTraffic(db);
+      } finally {
+        db.close();
+      }
+      return true;
+    }
+    case 'inspect': {
+      if (!positionals[0]) throw new Error('Usage: sak inspect <id> [--limit 500]');
+      const db = openCrawlDb(positionals[0]);
+      try {
+        await inspectMore(db, secrets, Number(values.limit ?? DEFAULT_INSPECTIONS));
+        printTraffic(db);
+      } finally {
+        db.close();
+      }
       return true;
     }
     case 'gsc':
@@ -88,8 +190,8 @@ export async function runIntegrationCommand(command: string, positionals: string
       const db = openCrawlDb(positionals[0]);
       try {
         const run = command === 'gsc' ? importSearchConsole : importAnalytics;
-        const result = await run(db, secrets, values.property, Number(values.days ?? 90));
-        console.log(`Imported ${result.rows} rows: ${result.matched} match crawled URLs, ${result.unmatched} don't.`);
+        const result = await run(db, secrets, values.property, Number(values.days ?? 90), fetch, values.account);
+        console.log(`Imported ${result.rows} rows: ${result.matched} match crawled URLs, ${result.unmatched} don't, ${result.dropped} are outside this crawl.`);
       } finally {
         db.close();
       }

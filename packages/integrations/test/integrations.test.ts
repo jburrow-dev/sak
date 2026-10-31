@@ -112,14 +112,14 @@ describe('Google imports', () => {
   it('joins Search Console rows to crawled URLs and counts the rest', async () => {
     const fetchImpl = vi.fn(async () => ok({ rows: [{ keys: [`${origin}/a#frag`], clicks: 3, impressions: 10, ctr: 0.3, position: 2 }, { keys: [`${origin}/not-crawled`], clicks: 1, impressions: 2, ctr: 0.5, position: 9 }] }));
     const result = await importSearchConsole(db, secrets, 'sc-domain:example.com', 90, fetchImpl as never);
-    expect(result).toEqual({ rows: 2, matched: 1, unmatched: 1 });
+    expect(result).toEqual({ rows: 2, matched: 1, unmatched: 1, dropped: 0 });
     expect(db.prepare('SELECT clicks FROM search_console WHERE url = ?').get(`${origin}/a`)).toEqual({ clicks: 3 });
   });
 
   it('builds full URLs from GA4 page paths', async () => {
-    const fetchImpl = vi.fn(async () => ok({ rowCount: 1, rows: [{ dimensionValues: [{ value: '/b' }], metricValues: [{ value: '7' }, { value: '5' }] }] }));
+    const fetchImpl = vi.fn(async () => ok({ rowCount: 1, rows: [{ dimensionValues: [{ value: 'example.com' }, { value: '/b' }], metricValues: [{ value: '7' }, { value: '5' }, { value: '6' }, { value: '9' }, { value: '1' }] }] }));
     const result = await importAnalytics(db, secrets, '123', 90, fetchImpl as never);
-    expect(result).toEqual({ rows: 1, matched: 1, unmatched: 0 });
+    expect(result).toEqual({ rows: 1, matched: 1, unmatched: 0, dropped: 0 });
     expect(db.prepare('SELECT sessions, engaged_sessions FROM analytics WHERE url = ?').get(`${origin}/b`)).toEqual({ sessions: 7, engaged_sessions: 5 });
   });
 

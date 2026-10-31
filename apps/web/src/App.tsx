@@ -1,31 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-
-async function api<T>(path: string): Promise<T> {
-  const response = await fetch(path);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? `Request failed: ${response.status}`);
-  return data as T;
-}
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error ?? `Request failed: ${response.status}`);
-  return data as T;
-}
-
-/** Keeps showing the current data while a refresh for the same path is in flight. */
-function useApi<T>(path: string | null, refresh: number = 0) {
-  const [state, setState] = useState<{ path: string | null; data?: T; error?: string }>({ path: null });
-  useEffect(() => {
-    if (!path) return;
-    let live = true;
-    api<T>(path).then((data) => live && setState({ path, data }), (error) => live && setState({ path, error: error.message }));
-    return () => { live = false; };
-  }, [path, refresh]);
-  const current = state.path === path;
-  return { data: current ? state.data : undefined, error: current ? state.error : undefined, loading: Boolean(path) && !current };
-}
+import { ConnectionsView, TrafficFields, TrafficStrip, trafficFromForm, type TrafficForm } from './Integrations.tsx';
+import { Check, Failure, post, useApi, useDebounced } from './shared.tsx';
 
 function query(params: Record<string, string | number | boolean | undefined>) {
   const search = new URLSearchParams();
@@ -33,11 +8,11 @@ function query(params: Record<string, string | number | boolean | undefined>) {
   return search.toString();
 }
 
-interface Crawl { id: string; startUrl: string | null; status: string | null; startedAt: string | null; pages: number; fetched: number; pending: number; issues: number; error: string | null; running: boolean }
+interface Crawl { id: string; startUrl: string | null; status: string | null; startedAt: string | null; pages: number; fetched: number; pending: number; issues: number; error: string | null; trafficStatus: string | null; running: boolean }
 interface Summary { type: string; severity: string; title: string; fix: string; count: number }
 interface PageOf<T> { total: number; offset: number; limit: number; items: T[] }
 interface Issue { type: string; severity: string; url: string; detail: string | null }
-interface UrlRow { url: string; kind: string; status: number | null; depth: number | null; indexable: number | null; indexability_reason: string | null; title: string | null; word_count: number | null; inlinks: number; issue_count: number; response_ms: number | null; clicks: number | null; impressions: number | null; sessions: number | null; error: string | null }
+interface UrlRow { url: string; kind: string; status: number | null; depth: number | null; indexable: number | null; indexability_reason: string | null; title: string | null; word_count: number | null; inlinks: number; issue_count: number; response_ms: number | null; clicks: number | null; impressions: number | null; position: number | null; sessions: number | null; bing_clicks: number | null; error: string | null }
 interface Link { url: string; type: string; anchor: string | null; nofollow: number; status: number | null }
 interface ElementColumn { key: string; label: string; type: 'url' | 'text' | 'number' | 'status' | 'bytes' | 'yesno' }
 interface ElementInfo { key: string; label: string; columns: ElementColumn[]; filters: { key: string; label: string }[] }
@@ -62,8 +37,6 @@ function Pager({ page, onOffset }: { page: PageOf<unknown>; onOffset: (offset: n
   );
 }
 
-const Failure = ({ message }: { message: string }) => <div className="panel error-box" role="alert">{message}</div>;
-
 const formatBytes = (value: number) => (value < 1024 ? `${value} B` : value < 1024 * 1024 ? `${(value / 1024).toFixed(1)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`);
 
 function useSort(initial = '', initialDesc = false) {
@@ -84,15 +57,6 @@ function SortHeader({ label, name, numeric, sort, onSort }: { label: string; nam
       <button className="th-button" onClick={() => onSort(name)}>{label}{active ? (sort.desc ? ' ↓' : ' ↑') : ''}</button>
     </th>
   );
-}
-
-function useDebounced(value: string, onChange?: () => void) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => { setDebounced(value); onChange?.(); }, 250);
-    return () => clearTimeout(timer);
-  }, [value]);
-  return debounced;
 }
 
 const SEVERITY_RANK: Record<string, number> = { error: 0, warning: 1, notice: 2 };
@@ -235,7 +199,8 @@ function ElementsView({ crawl, refresh, onOpenUrl }: { crawl: string; refresh: n
 const COLUMNS: { key: string; label: string; numeric?: boolean }[] = [
   { key: 'url', label: 'URL' }, { key: 'status', label: 'Status', numeric: true }, { key: 'title', label: 'Title' }, { key: 'depth', label: 'Depth', numeric: true },
   { key: 'inlinks', label: 'Inlinks', numeric: true }, { key: 'word_count', label: 'Words', numeric: true }, { key: 'issue_count', label: 'Issues', numeric: true },
-  { key: 'clicks', label: 'Clicks', numeric: true }, { key: 'sessions', label: 'Sessions', numeric: true },
+  { key: 'clicks', label: 'GSC clicks', numeric: true }, { key: 'impressions', label: 'GSC impressions', numeric: true }, { key: 'position', label: 'GSC position', numeric: true },
+  { key: 'sessions', label: 'GA4 sessions', numeric: true }, { key: 'bing_clicks', label: 'Bing clicks', numeric: true },
 ];
 
 function UrlsView({ crawl, refresh, onOpenUrl }: { crawl: string; refresh: number; onOpenUrl: (url: string) => void }) {
@@ -281,7 +246,10 @@ function UrlsView({ crawl, refresh, onOpenUrl }: { crawl: string; refresh: numbe
                   <td className="num">{row.word_count}</td>
                   <td className="num">{row.issue_count}</td>
                   <td className="num">{row.clicks}</td>
+                  <td className="num">{row.impressions}</td>
+                  <td className="num">{row.position === null ? '' : row.position.toFixed(1)}</td>
                   <td className="num">{row.sessions}</td>
+                  <td className="num">{row.bing_clicks}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -342,10 +310,17 @@ function UrlDetail({ crawl, url, onBack, onOpenUrl }: { crawl: string; url: stri
         {data.rendering?.rendered === 1 && <><dt>JS-only links</dt><dd>{data.rendering.js_only_links}</dd></>}
         {data.rendering?.render_error && <><dt>Render error</dt><dd>{data.rendering.render_error}</dd></>}
         {data.bytes !== null && <><dt>Size</dt><dd>{formatBytes(data.bytes)}</dd></>}
-        {data.clicks !== null && <><dt>Search Console</dt><dd>{data.clicks} clicks, {data.impressions} impressions</dd></>}
-        {data.sessions !== null && <><dt>GA4 sessions</dt><dd>{data.sessions}</dd></>}
+        {data.clicks !== null && <><dt>Search Console</dt><dd>{data.clicks} clicks, {data.impressions} impressions, CTR {((data.ctr ?? 0) * 100).toFixed(1)}%, average position {data.position?.toFixed(1)}</dd></>}
+        {data.sessions !== null && <><dt>GA4</dt><dd>{data.sessions} sessions, {data.engaged_sessions} engaged, {data.users ?? 'no'} users, {data.views ?? 'no'} views, {data.key_events ?? 'no'} key events</dd></>}
+        {data.bing_clicks !== null && <><dt>Bing</dt><dd>{data.bing_clicks} clicks, {data.bing_impressions} impressions, average position {data.bing_position?.toFixed(1)}</dd></>}
+        {data.inspection && <><dt>Google index status</dt><dd>{data.inspection.error ?? `${data.inspection.coverage_state ?? data.inspection.verdict}${data.inspection.last_crawl_time ? `, last crawled ${data.inspection.last_crawl_time.slice(0, 10)}` : ''}`}</dd></>}
+        {data.inspection?.google_canonical && <><dt>Google canonical</dt><dd>{data.inspection.google_canonical}</dd></>}
         {data.pagespeed?.map((p: any) => <span key={p.strategy} style={{ display: 'contents' }}><dt>PageSpeed ({p.strategy})</dt><dd>{p.performance}, LCP {Math.round(p.lcp_ms ?? 0)} ms, CLS {p.cls?.toFixed(3)}</dd></span>)}
       </dl>
+      {data.top_queries.length > 0 && (
+        <><h3>Top queries</h3><div className="panel"><table><thead><tr><th>Query</th><th className="num">Clicks</th><th className="num">Impressions</th><th className="num">Position</th></tr></thead>
+          <tbody>{data.top_queries.map((q: any) => <tr key={q.query}><td>{q.query}</td><td className="num">{q.clicks}</td><td className="num">{q.impressions}</td><td className="num">{q.position.toFixed(1)}</td></tr>)}</tbody></table></div></>
+      )}
       {data.redirect_chain.length > 0 && (
         <><h3>Redirect path</h3><ol>{data.redirect_chain.map((hop: any) => <li key={hop.hop} className="url">{hop.url} {hop.status && <Status value={hop.status} />}</li>)}</ol></>
       )}
@@ -438,7 +413,6 @@ function CostsView({ crawl, refresh }: { crawl: string | null; refresh: number }
   const [saveError, setSaveError] = useState<string | null>(null);
   if (error) return <Failure message={error} />;
   if (!data) return null;
-  const labels: Record<string, string> = { dataforseo: 'DataForSEO', pagespeed: 'PageSpeed Insights key', 'google-client': 'Google OAuth client', 'google-tokens': 'Google sign-in' };
   const setPaid = (paidApis: boolean) => {
     setSaveError(null);
     post('/api/settings', { paidApis }).then(() => setChanges((n) => n + 1), (e) => setSaveError(e.message));
@@ -459,10 +433,6 @@ function CostsView({ crawl, refresh }: { crawl: string | null; refresh: number }
       </div>
       {data.balanceError && <Failure message={data.balanceError} />}
       {crawl && <PaidData crawl={crawl} refresh={refresh} />}
-      <h3>Connections</h3>
-      <div className="panel"><table><tbody>{Object.entries(labels).map(([key, label]) => (
-        <tr key={key}><td>{label}</td><td>{data.keys[key] ? <span className="status-ok">Connected</span> : <span className="subtle">Not set up</span>}</td></tr>
-      ))}</tbody></table></div>
       <h3>Spend by endpoint</h3>
       {data.byEndpoint.length === 0 ? <p className="subtle">Nothing spent yet.</p> : (
         <div className="panel"><table><thead><tr><th>Endpoint</th><th className="num">Calls</th><th className="num">Cost</th></tr></thead>
@@ -472,18 +442,9 @@ function CostsView({ crawl, refresh }: { crawl: string | null; refresh: number }
   );
 }
 
-function Check({ checked, onChange, disabled, children, note }: { checked: boolean; onChange: (value: boolean) => void; disabled?: boolean; children: string; note?: string }) {
-  return (
-    <label className="check">
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span>{children}{note && <small className="subtle">{note}</small>}</span>
-    </label>
-  );
-}
-
 const lines = (value: string) => value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
 
-function NewCrawl({ onStarted, onCancel }: { onStarted: (id: string) => void; onCancel: () => void }) {
+function NewCrawl({ onStarted, onCancel, onConnections }: { onStarted: (id: string) => void; onCancel: () => void; onConnections: () => void }) {
   const { data: settings } = useApi<Settings>('/api/settings');
   const [url, setUrl] = useState('');
   const [renderJs, setRenderJs] = useState(false);
@@ -501,6 +462,7 @@ function NewCrawl({ onStarted, onCancel }: { onStarted: (id: string) => void; on
   const [volume, setVolume] = useState(false);
   const [rank, setRank] = useState(false);
   const [keywords, setKeywords] = useState('');
+  const [traffic, setTraffic] = useState<TrafficForm | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -520,6 +482,7 @@ function NewCrawl({ onStarted, onCancel }: { onStarted: (id: string) => void; on
       url, renderJs, checkResources, checkImages, checkExternal, useSitemaps, crawlSubdomains,
       maxUrls: maxUrls || undefined, requestsPerSecond: rate || undefined, seeds: lines(seeds), exclude: lines(exclude),
       ...(spends ? { paid: { backlinks, volume, rank, keywords: keywordList }, confirmed: true } : {}),
+      ...(traffic ? { traffic: trafficFromForm(traffic) } : {}),
     }).then(({ id }) => onStarted(id), (e) => { setError(e.message); setBusy(false); });
   };
 
@@ -549,6 +512,10 @@ function NewCrawl({ onStarted, onCancel }: { onStarted: (id: string) => void; on
         <div className="field"><label htmlFor="exclude">Exclude URLs matching these patterns, one per line</label><textarea id="exclude" rows={2} value={exclude} onChange={(e) => setExclude(e.target.value)} /></div>
       </details>
       <fieldset>
+        <legend>Search and analytics data</legend>
+        <TrafficFields url={url} subdomains={crawlSubdomains} onChange={setTraffic} onConnections={onConnections} />
+      </fieldset>
+      <fieldset>
         <legend>Paid data</legend>
         <Check checked={paidOn && allowed} disabled={!allowed} onChange={setPaidOn} note={allowed ? 'Off by default. A crawl on its own never spends.' : 'DataForSEO spending is switched off in the Costs tab.'}>Collect DataForSEO data when the crawl finishes</Check>
         {paidOn && allowed && (
@@ -562,7 +529,7 @@ function NewCrawl({ onStarted, onCancel }: { onStarted: (id: string) => void; on
       </fieldset>
       {error && <Failure message={error} />}
       <div className="toolbar">
-        <button className="btn primary" disabled={busy || !url.trim()}>{spends ? `Start crawl and spend up to $${estimate.toFixed(3)}` : 'Start crawl'}</button>
+        <button className="btn primary" disabled={busy || !url.trim() || (traffic !== null && !traffic.ready)}>{spends ? `Start crawl and spend up to $${estimate.toFixed(3)}` : 'Start crawl'}</button>
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>
       </div>
       {spends && <p className="subtle">Cached results are free, so it may cost less.</p>}
@@ -578,12 +545,14 @@ function CrawlControls({ overview, onChanged }: { overview: Crawl; onChanged: ()
   };
   const total = overview.fetched + overview.pending;
   const canResume = !overview.running && overview.status !== 'finished' && overview.pending > 0;
-  const status = overview.status === 'running' && !overview.running ? 'interrupted, or running in another window' : overview.status;
+  const crawling = overview.running && overview.status === 'running';
+  const pulling = overview.running && overview.trafficStatus === 'running';
+  const status = pulling ? 'pulling search and analytics data' : overview.status === 'running' && !overview.running ? 'interrupted, or running in another window' : overview.status;
   return (
     <div className="crawl-state">
       <span className="subtle" aria-live="polite">{status}{overview.pending > 0 ? `, ${overview.fetched} of ${total} URLs fetched` : ''}</span>
-      {overview.running && <progress max={Math.max(total, 1)} value={overview.fetched} aria-label="Crawl progress" />}
-      {overview.running && <button className="btn" onClick={() => act('pause')}>Pause</button>}
+      {crawling && <progress max={Math.max(total, 1)} value={overview.fetched} aria-label="Crawl progress" />}
+      {crawling && <button className="btn" onClick={() => act('pause')}>Pause</button>}
       {canResume && <button className="btn" onClick={() => act('resume')}>Resume</button>}
       {error && <span className="status-bad">{error}</span>}
     </div>
@@ -598,6 +567,7 @@ export function App() {
   const { data: crawls, error } = useApi<Crawl[]>('/api/crawls', tick);
   const [crawlId, setCrawlId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [tab, setTab] = useState<Tab>('issues');
   const [openUrl, setOpenUrl] = useState<string | null>(null);
   const active = crawlId ?? crawls?.[0]?.id ?? null;
@@ -619,18 +589,21 @@ export function App() {
     <div className="layout">
       <nav className="sidebar" aria-label="Crawls">
         <div className="brand">SAK</div>
-        <button className={"btn primary new-crawl-button"} onClick={() => setCreating(true)}>New crawl</button>
+        <button className={"btn primary new-crawl-button"} onClick={() => { setCreating(true); setConnecting(false); }}>New crawl</button>
+        <button className={`btn new-crawl-button ${connecting ? 'active' : ''}`} aria-pressed={connecting} onClick={() => { setConnecting(true); setCreating(false); }}>Connections</button>
         {error && <div className="error-box">{error}</div>}
         {crawls?.map((crawl) => (
-          <button key={crawl.id} className={`crawl-item ${!creating && crawl.id === active ? 'active' : ''}`} onClick={() => { setCrawlId(crawl.id); setOpenUrl(null); setCreating(false); }}>
+          <button key={crawl.id} className={`crawl-item ${!creating && !connecting && crawl.id === active ? 'active' : ''}`} onClick={() => { setCrawlId(crawl.id); setOpenUrl(null); setCreating(false); setConnecting(false); }}>
             <span className="crawl-host">{hostOf(crawl.startUrl)}</span>
             <span className="crawl-sub">{crawl.startedAt?.slice(0, 16).replace('T', ' ')} · {crawl.pages} URLs · {crawl.running ? 'running' : crawl.status}</span>
           </button>
         ))}
       </nav>
       <main className="main">
-        {creating ? (
-          <NewCrawl key="new" onCancel={() => setCreating(false)} onStarted={(id) => { setCrawlId(id); setCreating(false); setOpenUrl(null); setTab('issues'); refresh(); }} />
+        {connecting ? (
+          <ConnectionsView />
+        ) : creating ? (
+          <NewCrawl key="new" onConnections={() => { setConnecting(true); setCreating(false); }} onCancel={() => setCreating(false)} onStarted={(id) => { setCrawlId(id); setCreating(false); setOpenUrl(null); setTab('issues'); refresh(); }} />
         ) : (
           <>
             {crawls?.length === 0 && <div className="panel empty">No crawls yet. Choose New crawl to start one.</div>}
@@ -645,6 +618,7 @@ export function App() {
                   <div className="stat"><b>{count('warning')}</b><span>Warnings</span></div>
                   <div className="stat"><b>{count('notice')}</b><span>Notices</span></div>
                 </div>
+                <TrafficStrip key={`traffic-${active}`} crawl={active} overview={detail.overview} refresh={tick} onChanged={refresh} onConnections={() => setConnecting(true)} />
                 <div className="tabs" role="tablist">
                   {(['issues', 'elements', 'urls', 'compare', 'costs'] as Tab[]).map((name) => (
                     <button key={name} role="tab" aria-selected={tab === name} className={`tab ${tab === name ? 'active' : ''}`} onClick={() => { setTab(name); setOpenUrl(null); }}>

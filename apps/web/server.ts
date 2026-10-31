@@ -1,13 +1,17 @@
+import { execFile } from 'node:child_process';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  compareCrawls, createCrawlDb, crawlOverview, elementCatalog, elementCounts, elementCsv, issuesSummary, listCrawls, listElement, listIssues, listUrls, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, urlInfo, urlLinks, withCrawl, writeSettings,
+  compareCrawls, createCrawlDb, crawlOverview, elementCatalog, elementCounts, elementCsv, issuesSummary, getMeta, listCrawls, listElement, listIssues, listUrls, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, trafficPulls, urlInfo, urlLinks, withCrawl, writeSettings,
   type CrawlConfig,
 } from '@sak/core';
-import { ApiCache, DataForSeo, ESTIMATED_COST, KeychainStore, emptyPlan, readPaidData, runSavedPaidPlan, savePaidPlan, type PaidPlan } from '@sak/integrations';
+import {
+  ApiCache, DEFAULT_INSPECTIONS, DataForSeo, ESTIMATED_COST, INSPECTIONS_PER_DAY, KeychainStore, TRAFFIC_DAYS, addBingKey, disconnectGoogle, emptyPlan, emptyTrafficPlan, googleAccounts, googleLogin, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveBingAccount, resolveGoogleAccount, resolveTrafficPlan, runSavedPaidPlan, runSavedTrafficPlan, savePaidPlan, saveTrafficPlan, suggestProperty,
+  type PaidPlan, type PropertyOption, type TrafficPlan, type TrafficSource,
+} from '@sak/integrations';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), 'dist');
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
@@ -33,6 +37,7 @@ function launch(id: string, run: (signal: AbortSignal) => Promise<string>) {
   running.set(id, controller);
   run(controller.signal)
     .then(() => runPaidStep(id))
+    .then(() => runTrafficStep(id))
     .catch((error) => console.error(`Crawl ${id}: ${error}`)) // The crawl records its own failure for the UI.
     .finally(() => running.delete(id));
 }
@@ -45,6 +50,72 @@ async function runPaidStep(id: string) {
   } finally {
     cache.close();
     db.close();
+  }
+}
+
+async function runTrafficStep(id: string) {
+  const db = openCrawlDb(id);
+  try {
+    await runSavedTrafficPlan(db, new KeychainStore());
+  } finally {
+    db.close();
+  }
+}
+
+/** Sign-in runs in the background while the browser is away at Google, and the UI polls for the outcome. */
+let googleSignIn: { state: 'pending' | 'done' | 'failed'; account?: string; error?: string; cancel?: AbortController } | null = null;
+
+function startGoogleSignIn() {
+  if (googleSignIn?.state === 'pending') throw badRequest('A Google sign-in is already waiting. Finish it or cancel it first.', 409);
+  const cancel = new AbortController();
+  googleSignIn = { state: 'pending', cancel };
+  googleLogin(new KeychainStore(), (url) => execFile('open', [url]), fetch, { signal: cancel.signal }).then(
+    (account) => { googleSignIn = { state: 'done', account }; },
+    (error) => { googleSignIn = { state: 'failed', error: error.message }; },
+  );
+  return { state: 'pending' };
+}
+
+async function connections() {
+  const secrets = new KeychainStore();
+  const [client, google, dataforseo, pagespeed] = await Promise.all([secrets.get('google-client'), googleAccounts(secrets), secrets.get('dataforseo'), secrets.get('pagespeed')]);
+  return {
+    google: { clientConfigured: Boolean(client), accounts: google, signIn: googleSignIn && { state: googleSignIn.state, account: googleSignIn.account, error: googleSignIn.error } },
+    bing: { accounts: readConnections().bing },
+    other: { dataforseo: Boolean(dataforseo), pagespeed: Boolean(pagespeed) },
+    days: TRAFFIC_DAYS,
+    inspections: { default: DEFAULT_INSPECTIONS, max: INSPECTIONS_PER_DAY },
+  };
+}
+
+async function properties(params: URLSearchParams) {
+  const source = params.get('source');
+  const account = params.get('account') || undefined;
+  const secrets = new KeychainStore();
+  const load: Record<string, () => Promise<PropertyOption[]>> = {
+    gsc: () => listSearchConsoleProperties(secrets, account),
+    ga4: () => listAnalyticsProperties(secrets, account),
+    bing: () => listBingSites(secrets, account),
+  };
+  if (!source || !load[source]) throw badRequest('Unknown source');
+  const options = await load[source]();
+  const url = params.get('url') ?? '';
+  const subdomains = params.get('subdomains') === 'true';
+  return {
+    properties: options.map((option) => ({ ...option, covers: url ? propertyCovers(option.id, url, subdomains) : true })),
+    suggested: url ? suggestProperty(source as TrafficSource, options, url, subdomains) : null,
+  };
+}
+
+async function trafficFromForm(input: unknown): Promise<TrafficPlan | null> {
+  if (!input) return null;
+  let plan: TrafficPlan;
+  try {
+    plan = parseTrafficPlan(input);
+    if (emptyTrafficPlan(plan)) return null;
+    return await resolveTrafficPlan(new KeychainStore(), plan);
+  } catch (error) {
+    throw badRequest((error as Error).message);
   }
 }
 
@@ -82,7 +153,7 @@ function positiveNumber(value: unknown, name: string, max: number): number | und
   return parsed;
 }
 
-function startFromForm(body: any) {
+async function startFromForm(body: any) {
   if (typeof body?.url !== 'string') throw badRequest('A start URL is required');
   const input: Partial<CrawlConfig> & { startUrl: string } = {
     startUrl: body.url,
@@ -117,11 +188,13 @@ function startFromForm(body: any) {
   const spends = plan !== null && !emptyPlan(plan);
   if (spends && !readSettings().paidApis) throw badRequest('Paid APIs are switched off, so this crawl cannot collect paid data.', 409);
   if (spends && body.confirmed !== true) throw badRequest('Agree to the estimated cost before starting this crawl.');
+  const traffic = await trafficFromForm(body.traffic);
 
   const id = newCrawlId(config.startUrl);
   const db = createCrawlDb(id);
   try {
     if (spends) savePaidPlan(db, plan);
+    if (traffic) saveTrafficPlan(db, traffic);
   } finally {
     db.close();
   }
@@ -135,9 +208,63 @@ async function handlePost(path: string, body: any): Promise<unknown> {
     return writeSettings({ paidApis: body.paidApis });
   }
   if (path === '/api/crawls') return startFromForm(body);
-  const match = path.match(/^\/api\/crawls\/([\w.-]+)\/(pause|resume)$/);
+  if (path === '/api/connections/google/client') {
+    const id = typeof body?.clientId === 'string' ? body.clientId.trim() : '';
+    const secret = typeof body?.clientSecret === 'string' ? body.clientSecret.trim() : '';
+    if (!id || !secret) throw badRequest('Enter both the client ID and the client secret');
+    await new KeychainStore().set('google-client', `${id}:${secret}`);
+    return connections();
+  }
+  if (path === '/api/connections/google/login') return startGoogleSignIn();
+  if (path === '/api/connections/google/login/cancel') {
+    googleSignIn?.cancel?.abort();
+    return connections();
+  }
+  if (path === '/api/connections/bing/key') {
+    try {
+      return await addBingKey(new KeychainStore(), String(body?.label ?? ''), String(body?.key ?? ''));
+    } catch (error) {
+      throw badRequest((error as Error).message);
+    }
+  }
+  const disconnect = path.match(/^\/api\/connections\/(google|bing)\/([^/]+)\/disconnect$/);
+  if (disconnect) {
+    const account = decodeURIComponent(disconnect[2]);
+    if (disconnect[1] === 'google') await disconnectGoogle(new KeychainStore(), await resolveGoogleAccount(new KeychainStore(), account));
+    else await removeBingKey(new KeychainStore(), resolveBingAccount(account));
+    return connections();
+  }
+  const match = path.match(/^\/api\/crawls\/([\w.-]+)\/(pause|resume|traffic|inspect)$/);
   if (!match) throw badRequest('Not found', 404);
   const [, id, action] = match;
+  if (action === 'traffic' || action === 'inspect') {
+    if (running.has(id)) throw badRequest('This crawl is still working. Wait for it to finish.', 409);
+    if (withCrawl(id, (db) => getMeta(db, 'status')) !== 'finished') throw badRequest('Search and analytics data can only be added to a finished crawl.', 409);
+    if (action === 'traffic') {
+      const plan = await trafficFromForm(body?.traffic);
+      if (!plan) throw badRequest('Choose at least one source');
+      const db = openCrawlDb(id);
+      try {
+        saveTrafficPlan(db, plan);
+      } finally {
+        db.close();
+      }
+      launch(id, async () => id);
+      return { id, status: 'pulling' };
+    }
+    const limit = Number(body?.limit ?? DEFAULT_INSPECTIONS);
+    if (!Number.isInteger(limit) || limit < 1 || limit > INSPECTIONS_PER_DAY) throw badRequest(`Choose 1 to ${INSPECTIONS_PER_DAY} URLs`);
+    launch(id, async () => {
+      const db = openCrawlDb(id);
+      try {
+        await inspectMore(db, new KeychainStore(), limit);
+      } finally {
+        db.close();
+      }
+      return id;
+    });
+    return { id, status: 'inspecting' };
+  }
   if (action === 'pause') {
     const controller = running.get(id);
     if (!controller) throw badRequest('This crawl is not running in this window', 409);
@@ -155,6 +282,8 @@ async function handleApi(path: string, params: URLSearchParams): Promise<unknown
   if (path === '/api/costs') return costs();
   if (path === '/api/settings') return { ...readSettings(), prices: ESTIMATED_COST };
   if (path === '/api/elements') return elementCatalog();
+  if (path === '/api/connections') return connections();
+  if (path === '/api/properties') return properties(params);
   if (path === '/api/compare') {
     const before = openCrawlDb(params.get('before') ?? '', { readonly: true });
     const after = openCrawlDb(params.get('after') ?? '', { readonly: true });
@@ -177,7 +306,7 @@ async function handleApi(path: string, params: URLSearchParams): Promise<unknown
       : { counts: elementCounts(db, key), page: listElement(db, key, { ...query, ...paging }) }));
   }
 
-  const match = path.match(/^\/api\/crawls\/([\w.-]+)(?:\/(issues|urls|url|links|paid))?$/);
+  const match = path.match(/^\/api\/crawls\/([\w.-]+)(?:\/(issues|urls|url|links|paid|traffic))?$/);
   if (!match) throw badRequest('Not found', 404);
   const [, id, section] = match;
   return withCrawl(id, (db) => {
@@ -198,6 +327,8 @@ async function handleApi(path: string, params: URLSearchParams): Promise<unknown
         return urlLinks(db, params.get('url') ?? '', params.get('direction') === 'out' ? 'out' : 'in', paging);
       case 'paid':
         return readPaidData(db);
+      case 'traffic':
+        return { pulls: trafficPulls(db), plan: readTrafficPlan(db), subdomains: Boolean((JSON.parse(getMeta(db, 'config') ?? '{}') as Partial<CrawlConfig>).crawlSubdomains) };
       default:
         return { overview: { ...crawlOverview(db, id), running: running.has(id) }, summary: issuesSummary(db) };
     }

@@ -4,6 +4,7 @@ import type { PageRow, UrlRow } from './types.ts';
 import { ISSUES } from './checks/catalog.ts';
 import { runPageChecks, type PageInput } from './checks/page.ts';
 import { buildRedirectChains, runSiteChecks, type SiteInput } from './checks/site.ts';
+import { runTrafficChecks } from './checks/traffic.ts';
 
 export const URL_ROW_SQL = `SELECT u.id, u.url, u.kind, u.state, u.depth, u.in_sitemap, u.indexable, u.indexability_reason,
   r.status, r.content_type, r.redirect_target, r.x_robots, r.link_canonical, r.response_ms, r.bytes, r.error, r.blocked_reason
@@ -103,6 +104,7 @@ export function runAnalysis(db: Db): void {
   };
   const chains = buildRedirectChains(urls);
   findings.push(...runSiteChecks(site, chains));
+  findings.push(...runTrafficChecks(db, urls));
 
   const urlIds = new Map(urls.map((u) => [u.url, u.id]));
   db.transaction(() => {

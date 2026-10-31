@@ -54,6 +54,25 @@ const LINK_SOURCE = `SELECT l.rowid AS id, s.url AS source, t.url, t.kind AS tar
   FROM links l JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id LEFT JOIN responses r ON r.url_id = t.id
   WHERE l.type = 'a'`;
 
+const TRAFFIC_SOURCE = `SELECT u.id, u.url, u.indexable, u.indexability_reason, r.status, r.error, r.blocked_reason,
+    sc.clicks AS gsc_clicks, sc.impressions AS gsc_impressions, sc.ctr AS gsc_ctr, sc.position AS gsc_position,
+    an.sessions, an.engaged_sessions, an.users, an.views, an.key_events,
+    bw.clicks AS bing_clicks, bw.impressions AS bing_impressions, bw.impression_position AS bing_position
+  FROM urls u LEFT JOIN responses r ON r.url_id = u.id
+  LEFT JOIN search_console sc ON sc.url = u.url LEFT JOIN analytics an ON an.url = u.url LEFT JOIN bing_webmaster bw ON bw.url = u.url
+  WHERE u.kind = 'page'`;
+
+const QUERY_SOURCE = `SELECT q.rowid AS id, q.url, q.query, q.clicks, q.impressions, q.ctr, q.position FROM gsc_queries q`;
+
+const INSPECTION_SOURCE = `SELECT i.rowid AS id, i.url, i.verdict, i.coverage_state, i.last_crawl_time, i.google_canonical, i.user_canonical, i.robots_state, i.page_fetch_state, i.error FROM url_inspection i`;
+
+/** Rows imported for URLs the crawl never reached as a page. */
+const NOT_IN_CRAWL_SOURCE = `SELECT ROW_NUMBER() OVER (ORDER BY url) AS id, url, MAX(gsc_clicks) AS gsc_clicks, MAX(gsc_impressions) AS gsc_impressions, MAX(sessions) AS sessions, MAX(bing_clicks) AS bing_clicks FROM (
+    SELECT url, clicks AS gsc_clicks, impressions AS gsc_impressions, NULL AS sessions, NULL AS bing_clicks FROM search_console
+    UNION ALL SELECT url, NULL, NULL, sessions, NULL FROM analytics
+    UNION ALL SELECT url, NULL, NULL, NULL, clicks FROM bing_webmaster
+  ) WHERE url NOT IN (SELECT url FROM urls WHERE kind = 'page') GROUP BY url`;
+
 const column = (key: string, label: string, type: ElementColumnType = 'text'): ElementColumn => ({ key, label, type });
 const filter = (key: string, label: string, where: string): ElementFilter => ({ key, label, where });
 const ALL = filter('all', 'All', '');
@@ -181,6 +200,38 @@ const ELEMENTS: ElementDefinition[] = [
     search: ['url', 'render_error'],
     columns: [URL_COLUMN, column('rendered', 'Rendered', 'yesno'), column('raw_word_count', 'Words as served', 'number'), column('word_count', 'Words', 'number'), column('js_only_links', 'JS-only links', 'number'), column('script_count', 'Scripts', 'number'), column('render_error', 'Render error')],
     filters: [ALL, filter('rendered', 'Rendered', 'rendered = 1'), filter('not-rendered', 'Not rendered', 'rendered = 0'), issueFilter('content', 'Most content needs JS', 'js_only_content'), issueFilter('links', 'JS-only links', 'js_only_links'), issueFilter('failed', 'Render failed', 'render_failed'), issueFilter('dependent', 'May need rendering', 'js_dependent')],
+  },
+  {
+    key: 'search',
+    label: 'Search and analytics',
+    source: TRAFFIC_SOURCE,
+    search: ['url'],
+    columns: [URL_COLUMN, STATUS_COLUMN, column('indexable', 'Indexable', 'yesno'), column('gsc_clicks', 'GSC clicks', 'number'), column('gsc_impressions', 'GSC impressions', 'number'), column('gsc_position', 'GSC position', 'number'), column('sessions', 'GA4 sessions', 'number'), column('key_events', 'GA4 key events', 'number'), column('bing_clicks', 'Bing clicks', 'number'), column('bing_impressions', 'Bing impressions', 'number')],
+    filters: [ALL, filter('gsc-clicks', 'Has GSC clicks', 'gsc_clicks > 0'), filter('sessions', 'Has GA4 sessions', 'sessions > 0'), filter('bing-clicks', 'Has Bing clicks', 'bing_clicks > 0'), issueFilter('no-impressions', 'No impressions', 'traffic_no_impressions'), issueFilter('non-indexable', 'Non-indexable with traffic', 'traffic_non_indexable'), issueFilter('not-in-sitemap', 'Traffic, not in sitemap', 'traffic_not_in_sitemap')],
+  },
+  {
+    key: 'queries',
+    label: 'Top queries',
+    source: QUERY_SOURCE,
+    search: ['url', 'query'],
+    columns: [URL_COLUMN, column('query', 'Query'), column('clicks', 'Clicks', 'number'), column('impressions', 'Impressions', 'number'), column('position', 'Position', 'number')],
+    filters: [ALL, filter('top-3', 'Position 1 to 3', 'position <= 3'), filter('striking', 'Position 4 to 20', 'position > 3 AND position <= 20'), filter('no-clicks', 'No clicks', 'clicks = 0')],
+  },
+  {
+    key: 'index-status',
+    label: 'Index status',
+    source: INSPECTION_SOURCE,
+    search: ['url', 'coverage_state', 'google_canonical'],
+    columns: [URL_COLUMN, column('verdict', 'Verdict'), column('coverage_state', 'Coverage'), column('last_crawl_time', 'Last Google crawl'), column('google_canonical', 'Google canonical', 'url'), column('user_canonical', 'Declared canonical', 'url'), column('error', 'Error')],
+    filters: [ALL, filter('indexed', 'Indexed', `verdict = 'PASS'`), filter('not-indexed', 'Not indexed', `verdict IN ('FAIL', 'NEUTRAL')`), issueFilter('not-indexed-here', 'Indexable here only', 'index_not_indexed'), issueFilter('canonical', 'Different canonical', 'index_canonical_mismatch'), filter('failed', 'Could not inspect', 'error IS NOT NULL')],
+  },
+  {
+    key: 'not-in-crawl',
+    label: 'Not in crawl',
+    source: NOT_IN_CRAWL_SOURCE,
+    search: ['url'],
+    columns: [URL_COLUMN, column('gsc_clicks', 'GSC clicks', 'number'), column('gsc_impressions', 'GSC impressions', 'number'), column('sessions', 'GA4 sessions', 'number'), column('bing_clicks', 'Bing clicks', 'number')],
+    filters: [ALL, filter('gsc-clicks', 'Has GSC clicks', 'gsc_clicks > 0'), filter('sessions', 'Has GA4 sessions', 'sessions > 0'), filter('bing-clicks', 'Has Bing clicks', 'bing_clicks > 0')],
   },
   resourceElement('images', 'Images', 'image'),
   resourceElement('css', 'CSS', 'css'),

@@ -12,4 +12,4 @@ export * from './export.ts';
 export * from './compare.ts';
 export * from './sitemap.ts';
 export { ISSUES } from './checks/catalog.ts';
-export { Database, crawlPath, createCrawlDb, listCrawlIds, openCrawlDb, sakHome, getMeta, setMeta, type Db } from './db.ts';
+export { Database, crawlPath, createCrawlDb, listCrawlIds, openCrawlDb, sakHome, deleteMeta, getMeta, setMeta, type Db } from './db.ts';

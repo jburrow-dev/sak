@@ -94,6 +94,24 @@ a.btn { text-decoration: none; color: inherit; }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
 .empty { padding: 32px; text-align: center; color: var(--muted); }
 .error-box { padding: 12px; color: var(--error); }
+.new-crawl-button + .new-crawl-button { margin-top: -6px; }
+.btn.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.field select { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+.segments { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; width: fit-content; }
+.segments button { border: 0; border-right: 1px solid var(--line); background: var(--panel); padding: 5px 12px; cursor: pointer; }
+.segments button:last-child { border-right: 0; }
+.segments button:hover { background: var(--hover); }
+.segments button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); font-weight: 550; }
+.range-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.source-options { display: flex; flex-direction: column; gap: 8px; padding-left: 22px; }
+.traffic-strip { margin: 0 0 16px; }
+.traffic-strip summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
+.traffic-form { max-width: 620px; display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 12px 14px; }
+.connection-group { padding: 12px 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
+.connection-group h3 { margin: 0; font-size: 14px; }
+.connection-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.connections { max-width: 720px; }
+.connections ol { margin: 0; padding-left: 20px; }
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }

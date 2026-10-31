@@ -23,7 +23,7 @@ function* rows(db: Db, kind: ExportKind): Generator<unknown[]> {
       JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id LEFT JOIN responses r ON r.url_id = t.id`;
     for (const r of db.prepare(sql).iterate() as Iterable<any>) yield [r.source, r.target, r.type, r.anchor, r.nofollow, r.status];
   } else {
-    const columns = ['url', 'kind', 'status', 'depth', 'indexable', 'indexability_reason', 'redirect_target', 'title', 'meta_description', 'h1', 'canonical', 'word_count', 'inlinks', 'in_sitemap', 'response_ms', 'issue_count', 'clicks', 'impressions', 'sessions', 'error', 'blocked_reason'] as const;
+    const columns = ['url', 'kind', 'status', 'depth', 'indexable', 'indexability_reason', 'redirect_target', 'title', 'meta_description', 'h1', 'canonical', 'word_count', 'inlinks', 'in_sitemap', 'response_ms', 'issue_count', 'clicks', 'impressions', 'ctr', 'position', 'sessions', 'engaged_sessions', 'users', 'views', 'key_events', 'bing_clicks', 'bing_impressions', 'bing_position', 'error', 'blocked_reason'] as const;
     yield [...columns];
     const pageSize = 1000;
     for (let offset = 0; ; offset += pageSize) {

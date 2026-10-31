@@ -61,4 +61,9 @@ export const ISSUES: Record<string, IssueDefinition> = {
   low_inlinks: { severity: 'notice', title: 'Only one internal link points here', fix: 'Add internal links if the page matters.' },
   sitemap_non_indexable: { severity: 'warning', title: 'Sitemap lists a non-indexable URL', fix: 'List only 200, indexable, canonical URLs.' },
   sitemap_orphan: { severity: 'warning', title: 'In the sitemap but not linked internally', fix: 'Link to it or remove it from the sitemap.' },
+  traffic_non_indexable: { severity: 'warning', title: 'Non-indexable page is getting traffic', fix: 'Make the page indexable if the traffic matters, or send visitors to the page you want them on.' },
+  traffic_no_impressions: { severity: 'notice', title: 'Indexable page with no Search Console impressions', fix: 'Check that Google has indexed it and that it targets something people search for.' },
+  traffic_not_in_sitemap: { severity: 'notice', title: 'Page with traffic is missing from the sitemap', fix: 'Add it to the sitemap if it should stay indexed.' },
+  index_not_indexed: { severity: 'warning', title: 'Indexable here, but Google reports it not indexed', fix: 'See the coverage state in the URL details, then fix the cause or request indexing.' },
+  index_canonical_mismatch: { severity: 'warning', title: 'Google chose a different canonical', fix: 'Align internal links, redirects and sitemaps with the canonical you declared.' },
 };

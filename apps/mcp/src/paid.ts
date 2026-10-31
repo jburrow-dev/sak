@@ -1,11 +1,12 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { openCrawlDb, readSettings } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, PaidApisDisabled, emptyPlan, enrichCrawl, estimatePlan, importAnalytics, importSearchConsole, pagesForSpeedTest, readPaidData, runPageSpeed } from '@sak/integrations';
+import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, PaidApisDisabled, emptyPlan, enrichCrawl, estimatePlan, googleAccounts, importAnalytics, importBing, importSearchConsole, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, propertyCovers, readConnections, readPaidData, runPageSpeed, suggestProperty, type TrafficSource } from '@sak/integrations';
 
 type Reply = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
 const confirmField = z.boolean().optional().describe('Set true only after the user has agreed to the estimated cost');
+const accountField = z.string().optional().describe('Google account email. Needed only when several are connected.');
 const refreshField = z.boolean().optional().describe('Bypass the cache. This costs money again.');
 const whereFields = {
   location: z.number().int().optional().describe('DataForSEO location code (default 2840, United States)'),
@@ -98,13 +99,38 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
 
   server.registerTool('gsc_import', {
     description: 'Load Search Console clicks and impressions into a crawl. Requires sak google login.',
-    inputSchema: { id: z.string(), property: z.string().describe('For example sc-domain:example.com'), days: z.number().int().min(1).max(480).optional() },
-  }, ({ id, property, days }) => withWritableCrawl(id, (db) => importSearchConsole(db, secrets, property, days ?? 90)));
+    inputSchema: { id: z.string(), property: z.string().describe('For example sc-domain:example.com'), days: z.number().int().min(1).max(480).optional(), account: accountField },
+  }, ({ id, property, days, account }) => withWritableCrawl(id, (db) => importSearchConsole(db, secrets, property, days ?? 90, fetch, account)));
 
   server.registerTool('ga4_import', {
-    description: 'Load GA4 sessions into a crawl. Requires sak google login.',
-    inputSchema: { id: z.string(), property: z.string().describe('Numeric GA4 property id'), days: z.number().int().min(1).max(480).optional() },
-  }, ({ id, property, days }) => withWritableCrawl(id, (db) => importAnalytics(db, secrets, property, days ?? 90)));
+    description: 'Load GA4 sessions and engagement into a crawl. Requires sak google login.',
+    inputSchema: { id: z.string(), property: z.string().describe('Numeric GA4 property id'), days: z.number().int().min(1).max(480).optional(), account: accountField },
+  }, ({ id, property, days, account }) => withWritableCrawl(id, (db) => importAnalytics(db, secrets, property, days ?? 90, fetch, account)));
+
+  server.registerTool('bing_import', {
+    description: "Load Bing Webmaster clicks and impressions into a crawl. Requires sak bing key add. Bing takes no date range, so the result's period may differ from the days asked for: read the stored note through crawl_status.",
+    inputSchema: { id: z.string(), site: z.string().describe('For example https://www.example.com/'), days: z.number().int().min(1).max(480).optional(), account: z.string().optional().describe('Name of the Bing key. Needed only when several are connected.') },
+  }, ({ id, site, days, account }) => withWritableCrawl(id, (db) => importBing(db, secrets, site, days ?? 30, fetch, account)));
+
+  server.registerTool('connections_list', { description: 'Which Google accounts and Bing keys are connected, without any credentials. Signing in is done by the user, with sak google login or in the sak ui Connections screen.' }, async () => {
+    try {
+      return json({ google_client_set: Boolean(await secrets.get('google-client')), google: await googleAccounts(secrets), bing: readConnections().bing });
+    } catch (error) {
+      return failure((error as Error).message);
+    }
+  });
+
+  server.registerTool('properties_list', {
+    description: 'Search Console properties, GA4 properties or Bing sites available to an account. Pass url to get a suggested property for that site.',
+    inputSchema: { source: z.enum(['gsc', 'ga4', 'bing']), account: accountField, url: z.string().optional() },
+  }, async ({ source, account, url }) => {
+    try {
+      const options = await (source === 'gsc' ? listSearchConsoleProperties(secrets, account) : source === 'ga4' ? listAnalyticsProperties(secrets, account) : listBingSites(secrets, account));
+      return json({ properties: options.map((option) => ({ ...option, covers: url ? propertyCovers(option.id, url) : true })), suggested: url ? suggestProperty(source as TrafficSource, options, url) : null });
+    } catch (error) {
+      return failure((error as Error).message);
+    }
+  });
 
   server.registerTool('pagespeed_run', {
     description: 'Run PageSpeed Insights on specific URLs, or on the most-linked indexable pages. Each URL takes up to a minute.',

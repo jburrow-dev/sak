@@ -5,13 +5,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import {
-  compareCrawls, crawlOverview, elementCatalog, elementCounts, exportCsv, isInternal, issuesSummary, listCrawls, listElement, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, urlInfo, urlLinks, withCrawl,
+  compareCrawls, crawlOverview, createCrawlDb, elementCatalog, elementCounts, exportCsv, isInternal, issuesSummary, getMeta, listCrawls, listElement, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, trafficPulls, urlInfo, urlLinks, withCrawl,
   type CrawlConfig,
 } from '@sak/core';
+import { KeychainStore, emptyTrafficPlan, parseTrafficPlan, readTrafficPlan, resolveTrafficPlan, runSavedTrafficPlan, saveTrafficPlan, type TrafficPlan } from '@sak/integrations';
 import { dataForSeoTools } from './paid.ts';
 
 const server = new McpServer({ name: 'sak', version: '0.1.0' }, {
-  instructions: 'SAK crawls websites locally and audits technical SEO. Start with crawl_start, poll crawl_status, then read issues_summary before drilling into issues_list. Lists are paginated. Tools marked paid cost money: call them without confirm first to see the estimate, and only confirm when the user has agreed.',
+  instructions: 'SAK crawls websites locally and audits technical SEO. Start with crawl_start, poll crawl_status, then read issues_summary before drilling into issues_list. Lists are paginated. Tools marked paid cost money: call them without confirm first to see the estimate, and only confirm when the user has agreed. To add free Search Console, GA4 or Bing data, use connections_list and properties_list, then pass traffic to crawl_start, or use traffic_refresh on a finished crawl. Only the user can sign in or add keys.',
 });
 
 const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] });
@@ -23,9 +24,41 @@ function launch(id: string, run: (signal: AbortSignal) => Promise<string>) {
   const controller = new AbortController();
   const entry: { controller: AbortController; error?: string } = { controller };
   running.set(id, entry);
-  run(controller.signal).catch((error) => { entry.error = String(error); }).finally(() => {
+  run(controller.signal).then(() => runTrafficStep(id)).catch((error) => { entry.error = String(error); }).finally(() => {
     if (!entry.error) running.delete(id);
   });
+}
+
+async function runTrafficStep(id: string) {
+  const db = openCrawlDb(id);
+  try {
+    await runSavedTrafficPlan(db, new KeychainStore());
+  } finally {
+    db.close();
+  }
+}
+
+const trafficField = z.object({
+  days: z.union([z.literal(30), z.literal(60), z.literal(90)]).describe('Date range'),
+  gsc: z.object({
+    account: z.string().optional(),
+    property: z.string().describe('For example sc-domain:example.com'),
+    top_queries: z.boolean().optional().describe('Also keep the top 10 queries per page. Slower on large sites.'),
+    inspect: z.number().int().min(1).max(2000).optional().describe('How many URLs to check with URL Inspection. Google allows 2,000 a day per property.'),
+  }).optional(),
+  ga4: z.object({ account: z.string().optional(), property: z.string().describe('Numeric GA4 property id') }).optional(),
+  bing: z.object({ account: z.string().optional().describe('Name of the Bing key'), site: z.string() }).optional(),
+});
+
+/** Fails before anything runs if a property is missing or an account isn't connected. */
+async function trafficPlan(input: z.infer<typeof trafficField>): Promise<TrafficPlan | null> {
+  const plan = parseTrafficPlan({
+    days: input.days,
+    gsc: input.gsc && { account: input.gsc.account, property: input.gsc.property, topQueries: input.gsc.top_queries, ...(input.gsc.inspect ? { inspect: { limit: input.gsc.inspect } } : {}) },
+    ga4: input.ga4,
+    bing: input.bing,
+  });
+  return emptyTrafficPlan(plan) ? null : resolveTrafficPlan(new KeychainStore(), plan);
 }
 
 const paging = {
@@ -51,6 +84,7 @@ server.registerTool('crawl_start', {
     render_js: z.boolean().optional().describe('Render pages in Chrome. Slower, and needed for sites built with JavaScript.'),
     crawl_subdomains: z.boolean().optional().describe('Treat subdomains of the start host as part of the site'),
     seeds: z.array(z.string()).optional().describe('Extra in-scope start URLs, for sections nothing links to'),
+    traffic: trafficField.optional().describe('Free Search Console, GA4 and Bing data to collect once the crawl finishes'),
   },
 }, async (args) => {
   const startUrl = normalizeUrl(args.url);
@@ -82,7 +116,18 @@ server.registerTool('crawl_start', {
   } catch (error) {
     return failure(`Invalid regex: ${(error as Error).message}`);
   }
+  let traffic: TrafficPlan | null = null;
+  try {
+    traffic = args.traffic ? await trafficPlan(args.traffic) : null;
+  } catch (error) {
+    return failure((error as Error).message);
+  }
   const id = newCrawlId(startUrl);
+  if (traffic) {
+    const db = createCrawlDb(id);
+    saveTrafficPlan(db, traffic);
+    db.close();
+  }
   launch(id, (signal) => startCrawl(config, { signal }, id));
   return json({ id, status: 'started' });
 });
@@ -112,7 +157,30 @@ server.registerTool('crawl_status', {
 }, async ({ id }) => {
   const entry = running.get(id);
   if (entry?.error) return failure(`Crawl failed: ${entry.error}`);
-  return json({ ...withCrawl(id, (db) => crawlOverview(db, id)), running_in_this_server: Boolean(entry) });
+  return json({ ...withCrawl(id, (db) => ({ ...crawlOverview(db, id), traffic: trafficPulls(db) })), running_in_this_server: Boolean(entry) });
+});
+
+server.registerTool('traffic_refresh', {
+  description: 'Pull Search Console, GA4 and Bing data for a finished crawl in the background, without crawling again. Poll crawl_status and read its traffic field. Leave traffic out to repeat the saved sources.',
+  inputSchema: { id: z.string(), traffic: trafficField.optional() },
+}, async ({ id, traffic }) => {
+  const entry = running.get(id);
+  if (entry && !entry.error) return failure(`Crawl ${id} is still working`);
+  try {
+    const db = openCrawlDb(id);
+    try {
+      if (getMeta(db, 'status') !== 'finished') return failure('Search and analytics data can only be added to a finished crawl.');
+      const plan = traffic ? await trafficPlan(traffic) : readTrafficPlan(db);
+      if (!plan) return failure('This crawl has no saved sources, so pass traffic.');
+      saveTrafficPlan(db, plan);
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    return failure((error as Error).message);
+  }
+  launch(id, async () => id);
+  return json({ id, status: 'pulling' });
 });
 
 server.registerTool('crawl_list', { description: 'All saved crawls, newest first.' }, async () => json(listCrawls()));
@@ -163,7 +231,7 @@ server.registerTool('urls_list', {
     status: z.number().int().optional(),
     indexable: z.boolean().optional(),
     search: z.string().optional().describe('Substring of the URL or title'),
-    sort: z.enum(['url', 'status', 'depth', 'title', 'word_count', 'inlinks', 'issue_count', 'response_ms', 'clicks', 'impressions', 'sessions']).optional(),
+    sort: z.enum(['url', 'status', 'depth', 'title', 'word_count', 'inlinks', 'issue_count', 'response_ms', 'clicks', 'impressions', 'position', 'sessions', 'key_events', 'bing_clicks', 'bing_impressions']).optional(),
     desc: z.boolean().optional(),
     ...paging,
   },

@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 export interface SecretStore {
   get(name: string): Promise<string | null>;
   set(name: string, value: string): Promise<void>;
+  delete(name: string): Promise<void>;
 }
 
 const quote = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
@@ -32,6 +33,16 @@ export class KeychainStore implements SecretStore {
       child.stdin.end(`add-generic-password -U -a sak -s ${quote(this.service(name))} -w ${quote(value)}\n`);
     });
   }
+
+  delete(name: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      execFile('security', ['delete-generic-password', '-a', 'sak', '-s', this.service(name)], (error) => {
+        // Exit code 44 means there was nothing to delete.
+        if (error && error.code !== 44) reject(new Error(`Could not remove from Keychain: ${error.message}`));
+        else resolve();
+      });
+    });
+  }
 }
 
 export class MemoryStore implements SecretStore {
@@ -41,5 +52,8 @@ export class MemoryStore implements SecretStore {
   }
   async set(name: string, value: string) {
     this.values.set(name, value);
+  }
+  async delete(name: string) {
+    this.values.delete(name);
   }
 }

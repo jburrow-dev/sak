@@ -21,6 +21,7 @@ export interface CrawlOverview {
   pending: number;
   issues: number;
   error: string | null;
+  trafficStatus: string | null;
 }
 
 export function withCrawl<T>(id: string, read: (db: Db) => T): T {
@@ -45,6 +46,7 @@ export function crawlOverview(db: Db, id: string): CrawlOverview {
     pending: count(`SELECT COUNT(*) AS n FROM urls WHERE state IN ('pending', 'in_progress')`),
     issues: count('SELECT COUNT(*) AS n FROM issues'),
     error: getMeta(db, 'error'),
+    trafficStatus: getMeta(db, 'traffic_status'),
   };
 }
 
@@ -112,7 +114,16 @@ export interface UrlListRow extends UrlRow {
   issue_count: number;
   clicks: number | null;
   impressions: number | null;
+  ctr: number | null;
+  position: number | null;
   sessions: number | null;
+  engaged_sessions: number | null;
+  users: number | null;
+  views: number | null;
+  key_events: number | null;
+  bing_clicks: number | null;
+  bing_impressions: number | null;
+  bing_position: number | null;
 }
 
 const LIST_SQL = `SELECT base.*,
@@ -123,13 +134,16 @@ const LIST_SQL = `SELECT base.*,
     p.word_count,
     (SELECT COUNT(DISTINCT l.source_id) FROM links l WHERE l.target_id = base.id AND (l.type = 'a' OR base.kind IN ('image', 'css', 'script'))) AS inlinks,
     (SELECT COUNT(*) FROM issues i WHERE i.url = base.url) AS issue_count,
-    sc.clicks, sc.impressions, an.sessions
+    sc.clicks, sc.impressions, sc.ctr, sc.position,
+    an.sessions, an.engaged_sessions, an.users, an.views, an.key_events,
+    bw.clicks AS bing_clicks, bw.impressions AS bing_impressions, bw.impression_position AS bing_position
   FROM (${URL_ROW_SQL}) base
   LEFT JOIN page_elements p ON p.url_id = base.id
   LEFT JOIN search_console sc ON sc.url = base.url
-  LEFT JOIN analytics an ON an.url = base.url`;
+  LEFT JOIN analytics an ON an.url = base.url
+  LEFT JOIN bing_webmaster bw ON bw.url = base.url`;
 
-const SORTABLE = new Set(['url', 'status', 'depth', 'title', 'word_count', 'inlinks', 'issue_count', 'response_ms', 'clicks', 'impressions', 'sessions']);
+const SORTABLE = new Set(['url', 'status', 'depth', 'title', 'word_count', 'inlinks', 'issue_count', 'response_ms', 'clicks', 'impressions', 'position', 'sessions', 'key_events', 'bing_clicks', 'bing_impressions']);
 
 export function listUrls(db: Db, filter: { kind?: string; status?: number; indexable?: boolean; search?: string; sort?: string; desc?: boolean; limit?: number; offset?: number } = {}): Page<UrlListRow> {
   const where: string[] = [];
@@ -161,6 +175,8 @@ export function urlInfo(db: Db, url: string) {
     redirect_chain: db.prepare('SELECT hop, url, status FROM redirect_hops WHERE start_id = ? ORDER BY hop').all(row.id),
     issues: db.prepare('SELECT type, severity, detail FROM issues WHERE url = ?').all(url),
     pagespeed: db.prepare('SELECT strategy, performance, lcp_ms, cls, inp_ms, ttfb_ms FROM pagespeed WHERE url = ?').all(url),
+    top_queries: db.prepare('SELECT query, clicks, impressions, ctr, position FROM gsc_queries WHERE url = ? ORDER BY clicks DESC, impressions DESC').all(url),
+    inspection: db.prepare('SELECT verdict, coverage_state, indexing_state, robots_state, page_fetch_state, last_crawl_time, google_canonical, user_canonical, error, fetched_at FROM url_inspection WHERE url = ?').get(url) ?? null,
   };
 }
 
@@ -180,4 +196,24 @@ export function urlLinks(db: Db, url: string, direction: 'in' | 'out', options: 
   const { n } = db.prepare(`SELECT COUNT(*) AS n ${from}`).get(url) as { n: number };
   const items = db.prepare(`SELECT o.url, l.type, l.anchor, l.nofollow, r.status ${from} ORDER BY o.url LIMIT ? OFFSET ?`).all(url, limit, offset) as LinkRow[];
   return { total: n, offset, limit, items };
+}
+
+export interface TrafficPull {
+  source: string;
+  account: string | null;
+  property: string | null;
+  days: number | null;
+  start_date: string | null;
+  end_date: string | null;
+  fetched_at: string;
+  status: string;
+  row_count: number;
+  matched: number;
+  dropped: number;
+  note: string | null;
+  error: string | null;
+}
+
+export function trafficPulls(db: Db): TrafficPull[] {
+  return db.prepare('SELECT * FROM traffic_pulls ORDER BY source').all() as TrafficPull[];
 }
