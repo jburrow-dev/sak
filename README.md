@@ -11,6 +11,9 @@ npm install
 npm run build:web
 npm link -w apps/cli
 ```
+## Start UI
+
+node apps/cli/src/main.ts ui --port 4600
 
 ## Crawling
 
