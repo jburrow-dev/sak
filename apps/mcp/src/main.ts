@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import {
-  compareCrawls, crawlOverview, exportCsv, isInternal, issuesSummary, listCrawls, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, urlInfo, urlLinks, withCrawl,
+  compareCrawls, crawlOverview, elementCatalog, elementCounts, exportCsv, isInternal, issuesSummary, listCrawls, listElement, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, urlInfo, urlLinks, withCrawl,
   type CrawlConfig,
 } from '@sak/core';
 import { dataForSeoTools } from './paid.ts';
@@ -47,6 +47,8 @@ server.registerTool('crawl_start', {
     use_sitemaps: z.boolean().optional(),
     check_external: z.boolean().optional(),
     check_images: z.boolean().optional(),
+    check_resources: z.boolean().optional().describe('Fetch linked CSS and scripts (default true)'),
+    render_js: z.boolean().optional().describe('Render pages in Chrome. Slower, and needed for sites built with JavaScript.'),
     crawl_subdomains: z.boolean().optional().describe('Treat subdomains of the start host as part of the site'),
     seeds: z.array(z.string()).optional().describe('Extra in-scope start URLs, for sections nothing links to'),
   },
@@ -64,6 +66,8 @@ server.registerTool('crawl_start', {
   if (args.use_sitemaps !== undefined) config.useSitemaps = args.use_sitemaps;
   if (args.check_external !== undefined) config.checkExternal = args.check_external;
   if (args.check_images !== undefined) config.checkImages = args.check_images;
+  if (args.check_resources !== undefined) config.checkResources = args.check_resources;
+  if (args.render_js !== undefined) config.renderJs = args.render_js;
   if (args.crawl_subdomains !== undefined) config.crawlSubdomains = args.crawl_subdomains;
   if (args.seeds) {
     for (const seed of args.seeds) {
@@ -119,15 +123,43 @@ server.registerTool('issues_summary', {
 }, async ({ id }) => json(withCrawl(id, (db) => issuesSummary(db))));
 
 server.registerTool('issues_list', {
-  description: 'Individual issues, filterable by type, severity or URL.',
-  inputSchema: { id: z.string(), type: z.string().optional(), severity: z.enum(['error', 'warning', 'notice']).optional(), url: z.string().optional(), ...paging },
+  description: 'Individual issues, filterable by type, severity or URL, and sortable.',
+  inputSchema: {
+    id: z.string(),
+    type: z.string().optional(),
+    severity: z.enum(['error', 'warning', 'notice']).optional(),
+    url: z.string().optional(),
+    search: z.string().optional().describe('Substring of the URL or detail'),
+    sort: z.enum(['type', 'severity', 'url', 'detail']).optional(),
+    desc: z.boolean().optional(),
+    ...paging,
+  },
 }, async ({ id, ...filter }) => json(withCrawl(id, (db) => listIssues(db, filter))));
+
+server.registerTool('elements_list', {
+  description: 'The SEO elements that can be browsed, such as page titles, H1s, canonicals, CSS and scripts, each with its filters and columns. Pass id and element to also get the count for each filter.',
+  inputSchema: { id: z.string().optional(), element: z.string().optional() },
+}, async ({ id, element }) => {
+  if (!id || !element) return json(elementCatalog());
+  return json(withCrawl(id, (db) => elementCounts(db, element)));
+});
+
+server.registerTool('element_rows', {
+  description: 'Rows for one element and filter from elements_list, for example element "title" with filter "duplicate".',
+  inputSchema: { id: z.string(), element: z.string(), filter: z.string().optional(), search: z.string().optional(), sort: z.string().optional().describe('A column key from elements_list'), desc: z.boolean().optional(), ...paging },
+}, async ({ id, element, ...query }) => {
+  try {
+    return json(withCrawl(id, (db) => listElement(db, element, { ...query, limit: query.limit ?? 50 })));
+  } catch (error) {
+    return failure((error as Error).message);
+  }
+});
 
 server.registerTool('urls_list', {
   description: 'Crawled URLs with status, indexability, title and metrics.',
   inputSchema: {
     id: z.string(),
-    kind: z.enum(['page', 'external', 'image']).optional(),
+    kind: z.enum(['page', 'external', 'image', 'css', 'script']).optional(),
     status: z.number().int().optional(),
     indexable: z.boolean().optional(),
     search: z.string().optional().describe('Substring of the URL or title'),

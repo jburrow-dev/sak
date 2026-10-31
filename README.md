@@ -32,7 +32,11 @@ sak crawl https://example.com --subdomains --seed https://blog.example.com/
 
 Scope is based on the start URL's host, so starting from `blog.example.com` won't cover `example.com`. Without `--subdomains`, `www` and non-`www` count as one site and other subdomains are external. Sitemaps are read for the start URL and each seed, unless `--no-sitemaps` is set.
 
-Defaults: 2 requests per second per host, robots.txt respected, sitemaps read, external links and images checked, 10,000 internal URLs. Run `sak` for all options. Ctrl-C pauses a crawl, and `sak resume <id>` continues it.
+Defaults: 2 requests per second per host, robots.txt respected, sitemaps read, external links, images, CSS and scripts checked, 10,000 internal URLs. Run `sak` for all options. Ctrl-C pauses a crawl, and `sak resume <id>` continues it.
+
+To render pages in Chrome, so content and links added by JavaScript are seen, add `--render`. It uses your installed Google Chrome with a throwaway profile, and is slower because each page is fetched and then rendered. Common analytics and ad requests are blocked, so crawling doesn't add visits to a site's reports. Results show what changed between the HTML as served and the rendered page.
+
+`sak ui` can also start, pause and resume crawls. Its Elements tab browses pages by SEO element, with filters such as duplicate titles or missing H1s, and exports any view to CSV.
 
 ## Claude (MCP)
 
@@ -52,13 +56,18 @@ Credentials are stored in the macOS Keychain.
 
 DataForSEO calls are cached for good and only re-fetched with `--refresh`. A call that would cost money shows an estimate and stops until you pass `--yes`.
 
+A crawl on its own never spends. To store paid data with a crawl, turn it on in the New crawl form, or add `--backlinks`, or `--keywords "a,b"` with `--volume` and `--rank`, plus `--yes`. It runs once the crawl finishes.
+
+`sak paid off`, or the switch in the UI's Costs tab, stops all DataForSEO calls from the CLI, the UI and Claude. Cached results still work.
+
 Google refresh tokens expire after 7 days while the OAuth app is in testing mode.
 
 ## Limits of this version
 
-- No JavaScript rendering. Pages that appear to need it get a `js_dependent` warning, so check those with another tool.
+- JavaScript rendering is off by default, and needs Google Chrome. Without it, pages that appear to need it get a `js_dependent` warning.
+- Requests a page makes while rendering aren't counted by the rate limit or checked against robots.txt.
 - No custom extraction, near-duplicate detection, spelling or accessibility checks.
-- CSS and scripts aren't crawled, so a broken stylesheet or script won't be reported.
+- CSS and scripts are fetched and checked, but not parsed, so files they load themselves, such as fonts or `@import`s, aren't found.
 - Structured data checks cover JSON-LD syntax and core properties, not Google's rich-result rules.
 - Pixel widths are estimates based on Arial metrics.
 
@@ -77,7 +86,7 @@ node scripts/compare-sf.ts <crawl-id> <export.ndjson>
 
 Expected differences from Screaming Frog's defaults:
 - SAK reads sitemaps, so it finds orphan pages. Screaming Frog doesn't unless configured to.
-- Screaming Frog crawls scripts and CSS as URLs. SAK doesn't.
+- SAK lists scripts and CSS separately from internal URLs, so they don't count toward its internal URL total.
 - SAK detects exact duplicates from visible text, and Screaming Frog from the full HTML, so SAK also flags identical pages with different canonicals.
 - SAK reports likely JS pages as `js_dependent`, not as low content.
 - Word counts are usually within 5% of Screaming Frog's, not identical. Both leave out nav and footer, but they split words differently.

@@ -54,7 +54,12 @@ CREATE TABLE IF NOT EXISTS page_elements (
   text_hash TEXT,
   html_bytes INTEGER NOT NULL,
   script_count INTEGER NOT NULL,
-  has_empty_app_root INTEGER NOT NULL
+  has_empty_app_root INTEGER NOT NULL,
+  h2s TEXT,
+  rendered INTEGER NOT NULL DEFAULT 0,
+  raw_word_count INTEGER,
+  js_only_links INTEGER,
+  render_error TEXT
 );
 CREATE TABLE IF NOT EXISTS hreflang (
   url_id INTEGER NOT NULL REFERENCES urls(id),
@@ -96,7 +101,37 @@ CREATE TABLE IF NOT EXISTS pagespeed (
   performance REAL, lcp_ms REAL, cls REAL, inp_ms REAL, ttfb_ms REAL,
   PRIMARY KEY (url, strategy)
 );
+CREATE TABLE IF NOT EXISTS paid_data (
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT,
+  cost REAL NOT NULL DEFAULT 0,
+  cached INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (kind, key)
+);
 `;
+
+const SCHEMA_VERSION = 2;
+
+// h2s stays NULL on crawls saved before it existed, so they don't read as "no H2" on every page.
+const ADDED_PAGE_COLUMNS: Record<string, string> = {
+  h2s: 'TEXT',
+  rendered: 'INTEGER NOT NULL DEFAULT 0',
+  raw_word_count: 'INTEGER',
+  js_only_links: 'INTEGER',
+  render_error: 'TEXT',
+};
+
+function migrate(db: Db): void {
+  db.exec(SCHEMA);
+  const existing = new Set((db.pragma('table_info(page_elements)') as { name: string }[]).map((c) => c.name));
+  for (const [name, type] of Object.entries(ADDED_PAGE_COLUMNS)) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE page_elements ADD COLUMN ${name} ${type}`);
+  }
+  db.pragma(`user_version = ${SCHEMA_VERSION}`);
+}
 
 export function sakHome(): string {
   return process.env.SAK_HOME ?? join(homedir(), '.sak');
@@ -117,7 +152,7 @@ export function createCrawlDb(id: string): Db {
   const db = new Database(crawlPath(id));
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
-  db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
@@ -127,9 +162,14 @@ export function openCrawlDb(id: string, options: { readonly?: boolean } = {}): D
   const db = new Database(path, { readonly: options.readonly ?? false });
   if (!options.readonly) {
     db.pragma('journal_mode = WAL');
-    db.exec(SCHEMA);
+    migrate(db);
+    return db;
   }
-  return db;
+  if ((db.pragma('user_version', { simple: true }) as number) >= SCHEMA_VERSION) return db;
+  // Read-only callers still need an up-to-date schema, so an older crawl is upgraded once.
+  db.close();
+  openCrawlDb(id).close();
+  return new Database(path, { readonly: true });
 }
 
 export function listCrawlIds(): string[] {

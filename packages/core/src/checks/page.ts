@@ -15,6 +15,10 @@ export interface PageInput {
   hreflang: { lang: string; href: string }[];
   jsonLd: string[];
   indexable: boolean;
+  rendered?: boolean;
+  rawWordCount?: number | null;
+  jsOnlyLinks?: number | null;
+  renderError?: string | null;
 }
 
 const REQUIRED_PROPERTIES: Record<string, string[]> = {
@@ -135,14 +139,25 @@ export function checkStructuredData(page: PageInput): IssueFinding[] {
 }
 
 export function checkContent(page: PageInput): IssueFinding[] {
-  const jsDependent = page.hasEmptyAppRoot || (page.wordCount < 50 && page.scriptCount >= 3);
+  // Once a page has been rendered there is nothing left to guess about.
+  const jsDependent = !page.rendered && (page.hasEmptyAppRoot || (page.wordCount < 50 && page.scriptCount >= 3));
   if (jsDependent) return [{ type: 'js_dependent', url: page.url, detail: `${page.wordCount} words, ${page.scriptCount} external scripts` }];
   if (page.wordCount < 200) return [{ type: 'low_word_count', url: page.url, detail: `${page.wordCount} words` }];
   return [];
 }
 
+export function checkRendering(page: PageInput): IssueFinding[] {
+  if (page.renderError) return [{ type: 'render_failed', url: page.url, detail: page.renderError }];
+  if (!page.rendered) return [];
+  const out: IssueFinding[] = [];
+  const raw = page.rawWordCount ?? 0;
+  if (page.wordCount >= 50 && raw < page.wordCount / 2) out.push({ type: 'js_only_content', url: page.url, detail: `${raw} words as served, ${page.wordCount} rendered` });
+  if (page.jsOnlyLinks) out.push({ type: 'js_only_links', url: page.url, detail: `${page.jsOnlyLinks} links` });
+  return out;
+}
+
 export function runPageChecks(page: PageInput): IssueFinding[] {
   // Snippet and content problems only matter on pages meant to appear in search.
   const searchChecks = page.indexable ? [checkTitles, checkMeta, checkHeadings, checkContent] : [];
-  return [...searchChecks, checkDirectives, checkHreflang, checkStructuredData].flatMap((check) => check(page));
+  return [...searchChecks, checkDirectives, checkHreflang, checkStructuredData, checkRendering].flatMap((check) => check(page));
 }

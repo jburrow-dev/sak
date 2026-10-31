@@ -94,7 +94,7 @@ export function checkLinks(input: SiteInput): IssueFinding[] {
   const byUrl = new Map(input.urls.map((u) => [u.url, u]));
   const out: IssueFinding[] = [];
   for (const link of input.links) {
-    if (link.type !== 'a' && link.type !== 'img') continue;
+    if (link.type !== 'a' && link.type !== 'img' && link.type !== 'css' && link.type !== 'script') continue;
     const target = byUrl.get(link.target);
     if (!target) continue;
     const label = target.status === null ? (target.error ?? 'no response') : String(target.status);
@@ -102,6 +102,8 @@ export function checkLinks(input: SiteInput): IssueFinding[] {
     const failed = target.error !== null || (target.status !== null && target.status >= 400);
     if (link.type === 'img') {
       if (failed) out.push({ type: 'image_broken', url: link.source, detail });
+    } else if (link.type === 'css' || link.type === 'script') {
+      if (failed && !target.blocked_reason) out.push({ type: link.type === 'css' ? 'css_broken' : 'script_broken', url: link.source, detail });
     } else if (target.kind === 'external') {
       if (target.status !== null && (EXTERNAL_REFUSAL.has(target.status) || target.blocked_reason)) out.push({ type: 'link_external_unverified', url: link.source, detail });
       else if (failed) out.push({ type: 'link_broken_external', url: link.source, detail });

@@ -1,3 +1,4 @@
+import { readSettings } from '@sak/core';
 import { ApiCache, type CachedResponse } from './cache.ts';
 import type { SecretStore } from './secrets.ts';
 
@@ -17,6 +18,16 @@ export class CostConfirmationRequired extends Error {
     super(`${what} will cost about $${estimate.toFixed(3)}. Confirm to continue.`);
     this.estimate = estimate;
   }
+}
+
+export class PaidApisDisabled extends Error {
+  constructor() {
+    super('Paid APIs are switched off, so nothing was spent. Cached results are still available. Turn them on with: sak paid on');
+  }
+}
+
+function requirePaidApis(): void {
+  if (!readSettings().paidApis) throw new PaidApisDisabled();
 }
 
 interface CallOptions {
@@ -65,6 +76,7 @@ export class DataForSeo {
   }
 
   private async post(endpoint: string, task: Record<string, unknown>): Promise<{ result: any[]; cost: number }> {
+    requirePaidApis();
     const response = await this.fetchImpl(API + endpoint, {
       method: 'POST',
       headers: { authorization: await this.authHeader(), 'content-type': 'application/json' },
@@ -85,6 +97,7 @@ export class DataForSeo {
       const hit = this.cache.get<T>(endpoint, task);
       if (hit) return hit;
     }
+    requirePaidApis();
     if (!options.confirmed) throw new CostConfirmationRequired(estimate, label);
     const { result, cost } = await this.post(endpoint, task);
     const value = transform(result);
@@ -116,6 +129,7 @@ export class DataForSeo {
     const tasks = keywords.map((keyword) => ({ keyword, location_code: where.location, language_code: where.language, depth: 10 }));
     const endpoint = 'serp/google/organic/live/regular';
     const misses = options.refresh ? tasks.length : tasks.filter((task) => !this.cache.get(endpoint, { ...task, domain })).length;
+    if (misses > 0) requirePaidApis();
     if (misses > 0 && !options.confirmed) throw new CostConfirmationRequired(misses * ESTIMATED_COST.rankCheck, `Rank check for ${misses} uncached keywords`);
     const bare = domain.replace(/^www\./, '').toLowerCase();
     const rows: RankRow[] = [];

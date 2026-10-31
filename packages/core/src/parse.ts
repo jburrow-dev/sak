@@ -41,6 +41,14 @@ export function parseHtml(html: string, pageUrl: string): PageFacts {
     const url = normalizeUrl($(el).attr('src') ?? '', base);
     if (url) links.push({ url, type: 'img', anchor: clean($(el).attr('alt') ?? '').slice(0, 300), nofollow: false });
   });
+  $('link[rel~="stylesheet" i][href]').each((_, el) => {
+    const url = normalizeUrl($(el).attr('href') ?? '', base);
+    if (url) links.push({ url, type: 'css', anchor: '', nofollow: false });
+  });
+  $('script[src]').each((_, el) => {
+    const url = normalizeUrl($(el).attr('src') ?? '', base);
+    if (url) links.push({ url, type: 'script', anchor: '', nofollow: false });
+  });
 
   const hreflang: HreflangEntry[] = [];
   $('link[rel="alternate"][hreflang]').each((_, el) => {
@@ -58,6 +66,7 @@ export function parseHtml(html: string, pageUrl: string): PageFacts {
   const titles = $('title').not('svg title').toArray().map((el) => clean($(el).text()));
   const metaDescriptions = $('meta[name="description" i]').toArray().map((el) => clean($(el).attr('content') ?? ''));
   const h1s = $('h1').toArray().map((el) => clean($(el).text()));
+  const h2s = $('h2').toArray().map((el) => clean($(el).text()));
   const metaRobots = $('meta[name="robots" i], meta[name="googlebot" i]').toArray().map((el) => clean($(el).attr('content') ?? '').toLowerCase());
   const jsonLd = $('script[type="application/ld+json"]').toArray().map((el) => ({ raw: $(el).text() }));
   const scriptCount = $('script[src]').length;
@@ -74,6 +83,7 @@ export function parseHtml(html: string, pageUrl: string): PageFacts {
     titles,
     metaDescriptions,
     h1s,
+    h2s,
     metaRobots,
     canonicals,
     hreflang,

@@ -20,6 +20,7 @@ export interface CrawlOverview {
   fetched: number;
   pending: number;
   issues: number;
+  error: string | null;
 }
 
 export function withCrawl<T>(id: string, read: (db: Db) => T): T {
@@ -43,11 +44,14 @@ export function crawlOverview(db: Db, id: string): CrawlOverview {
     fetched: count(`SELECT COUNT(*) AS n FROM urls WHERE state IN ('done', 'blocked_robots')`),
     pending: count(`SELECT COUNT(*) AS n FROM urls WHERE state IN ('pending', 'in_progress')`),
     issues: count('SELECT COUNT(*) AS n FROM issues'),
+    error: getMeta(db, 'error'),
   };
 }
 
 export function listCrawls(): CrawlOverview[] {
-  return listCrawlIds().map((id) => withCrawl(id, (db) => crawlOverview(db, id)));
+  return listCrawlIds()
+    .map((id) => withCrawl(id, (db) => crawlOverview(db, id)))
+    .sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
 }
 
 export interface IssueSummaryRow {
@@ -74,7 +78,9 @@ export interface IssueRow {
   detail: string | null;
 }
 
-export function listIssues(db: Db, filter: { type?: string; severity?: string; url?: string; limit?: number; offset?: number } = {}): Page<IssueRow> {
+const ISSUE_SORTABLE = new Set(['type', 'severity', 'url', 'detail']);
+
+export function listIssues(db: Db, filter: { type?: string; severity?: string; url?: string; search?: string; sort?: string; desc?: boolean; limit?: number; offset?: number } = {}): Page<IssueRow> {
   const where: string[] = [];
   const params: unknown[] = [];
   for (const column of ['type', 'severity', 'url'] as const) {
@@ -83,11 +89,16 @@ export function listIssues(db: Db, filter: { type?: string; severity?: string; u
       params.push(filter[column]);
     }
   }
+  if (filter.search) {
+    where.push('(url LIKE ? OR detail LIKE ?)');
+    params.push(`%${filter.search}%`, `%${filter.search}%`);
+  }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const limit = Math.min(filter.limit ?? 50, 1000);
   const offset = filter.offset ?? 0;
+  const sort = filter.sort && ISSUE_SORTABLE.has(filter.sort) ? filter.sort : 'id';
   const { n } = db.prepare(`SELECT COUNT(*) AS n FROM issues ${clause}`).get(...params) as { n: number };
-  const items = db.prepare(`SELECT type, severity, url, detail FROM issues ${clause} ORDER BY id LIMIT ? OFFSET ?`).all(...params, limit, offset) as IssueRow[];
+  const items = db.prepare(`SELECT type, severity, url, detail FROM issues ${clause} ORDER BY ${sort} ${filter.desc ? 'DESC' : 'ASC'} NULLS LAST, id LIMIT ? OFFSET ?`).all(...params, limit, offset) as IssueRow[];
   return { total: n, offset, limit, items };
 }
 
@@ -110,7 +121,7 @@ const LIST_SQL = `SELECT base.*,
     json_extract(p.h1s, '$[0]') AS h1,
     COALESCE(json_extract(p.canonicals, '$[0]'), base.link_canonical) AS canonical,
     p.word_count,
-    (SELECT COUNT(DISTINCT l.source_id) FROM links l WHERE l.target_id = base.id AND l.type = 'a') AS inlinks,
+    (SELECT COUNT(DISTINCT l.source_id) FROM links l WHERE l.target_id = base.id AND (l.type = 'a' OR base.kind IN ('image', 'css', 'script'))) AS inlinks,
     (SELECT COUNT(*) FROM issues i WHERE i.url = base.url) AS issue_count,
     sc.clicks, sc.impressions, an.sessions
   FROM (${URL_ROW_SQL}) base
@@ -139,11 +150,12 @@ export function listUrls(db: Db, filter: { kind?: string; status?: number; index
 export function urlInfo(db: Db, url: string) {
   const row = db.prepare(`SELECT * FROM (${LIST_SQL}) WHERE url = ?`).get(url) as (UrlListRow & { id: number }) | undefined;
   if (!row) return null;
-  const elements = db.prepare('SELECT titles, meta_descriptions, h1s, meta_robots, canonicals FROM page_elements WHERE url_id = ?').get(row.id) as Record<string, string> | undefined;
-  const parsed = elements ? Object.fromEntries(Object.entries(elements).map(([k, v]) => [k, JSON.parse(v)])) : null;
+  const elements = db.prepare('SELECT titles, meta_descriptions, h1s, h2s, meta_robots, canonicals FROM page_elements WHERE url_id = ?').get(row.id) as Record<string, string | null> | undefined;
+  const parsed = elements ? Object.fromEntries(Object.entries(elements).map(([k, v]) => [k, v === null ? null : JSON.parse(v)])) : null;
   return {
     ...row,
     elements: parsed,
+    rendering: db.prepare('SELECT rendered, raw_word_count, js_only_links, render_error FROM page_elements WHERE url_id = ?').get(row.id) ?? null,
     hreflang: db.prepare('SELECT lang, href FROM hreflang WHERE url_id = ?').all(row.id),
     structured_data_blocks: (db.prepare('SELECT COUNT(*) AS n FROM structured_data WHERE url_id = ?').get(row.id) as { n: number }).n,
     redirect_chain: db.prepare('SELECT hop, url, status FROM redirect_hops WHERE start_id = ? ORDER BY hop').all(row.id),

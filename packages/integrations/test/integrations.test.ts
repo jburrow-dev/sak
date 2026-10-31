@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createCrawlDb, setMeta, type Db } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, MemoryStore, dataForSeoBasicToken, importAnalytics, importSearchConsole, pagesForSpeedTest, parsePageSpeed, runPageSpeed } from '../src/index.ts';
+import { createCrawlDb, readSettings, setMeta, writeSettings, type Db } from '@sak/core';
+import { ApiCache, CostConfirmationRequired, DataForSeo, MemoryStore, PaidApisDisabled, dataForSeoBasicToken, emptyPlan, enrichCrawl, estimatePlan, readPaidData, runSavedPaidPlan, savePaidPlan, importAnalytics, importSearchConsole, pagesForSpeedTest, parsePageSpeed, runPageSpeed } from '../src/index.ts';
 
 let home: string;
 let cache: ApiCache;
@@ -165,6 +165,93 @@ describe('PageSpeed', () => {
     const fetchImpl = vi.fn(async (url: URL) => url.search.includes('%2F1') ? new Response(JSON.stringify({ error: { message: 'Quota' } }), { status: 429 }) : ok({ lighthouseResult: { categories: { performance: { score: 1 } }, audits: {} } }));
     const results = await runPageSpeed(db, secrets, ['https://e.com/1', 'https://e.com/2'], 'mobile', fetchImpl as never);
     expect(results.map((r) => r.error ?? r.performance)).toEqual(['Quota', 100]);
+    db.close();
+  });
+});
+
+describe('the paid API switch', () => {
+  afterEach(() => { writeSettings({ paidApis: true }); });
+
+  it('stops every paid call before any request, even when confirmed', async () => {
+    writeSettings({ paidApis: false });
+    const fetchImpl = vi.fn();
+    const client = new DataForSeo(secrets, cache, fetchImpl as never);
+    await expect(client.keywordVolume(['seo'], where, { confirmed: true })).rejects.toBeInstanceOf(PaidApisDisabled);
+    await expect(client.backlinkSummary('example.com', { confirmed: true, refresh: true })).rejects.toBeInstanceOf(PaidApisDisabled);
+    await expect(client.rankCheck('example.com', ['seo'], where, { confirmed: true })).rejects.toBeInstanceOf(PaidApisDisabled);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(cache.spend().calls).toBe(0);
+  });
+
+  it('still serves cached results while off', async () => {
+    const fetchImpl = vi.fn(async () => dfs([{ keyword: 'seo', search_volume: 100, competition: 'LOW', cpc: 1.5 }]));
+    const client = new DataForSeo(secrets, cache, fetchImpl as never);
+    await client.keywordVolume(['seo'], where, { confirmed: true });
+    writeSettings({ paidApis: false });
+    await expect(client.keywordVolume(['seo'], where)).resolves.toMatchObject({ cached: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a damaged settings file as off', () => {
+    writeFileSync(join(home, 'settings.json'), '{not json');
+    expect(readSettings().paidApis).toBe(false);
+  });
+});
+
+describe('per-crawl paid data', () => {
+  const plan = { backlinks: true, volume: true, rank: true, keywords: ['seo', 'crawler'] };
+  const crawlDb = () => {
+    const db = createCrawlDb('enrich');
+    setMeta(db, 'start_url', 'https://www.example.com/');
+    setMeta(db, 'status', 'finished');
+    return db;
+  };
+  const answers = vi.fn(async (url: string) => {
+    if (url.includes('backlinks')) return dfs([{ target: 'example.com', backlinks: 5, referring_domains: 2, rank: 40 }], 0.02);
+    if (url.includes('search_volume')) return dfs([{ keyword: 'seo', search_volume: 100 }], 0.09);
+    return dfs([{ items: [{ type: 'organic', domain: 'example.com', rank_group: 3, url: 'https://example.com/' }] }], 0.003);
+  });
+
+  it('estimates the most a plan can cost', () => {
+    expect(estimatePlan(plan)).toBeCloseTo(0.02 + 0.09 + 2 * 0.003);
+    expect(estimatePlan({ ...plan, keywords: [], rank: false })).toBeCloseTo(0.02 + 0);
+    expect(emptyPlan({ backlinks: false, volume: true, rank: true, keywords: [] })).toBe(true);
+    expect(emptyPlan(plan)).toBe(false);
+  });
+
+  it('stores each result with the crawl, using the domain of the start URL', async () => {
+    const db = crawlDb();
+    await enrichCrawl(db, new DataForSeo(secrets, cache, answers as never), plan);
+    const rows = readPaidData(db);
+    expect(rows.map((r) => r.kind)).toEqual(['backlinks', 'rank', 'volume']);
+    expect(rows[0]).toMatchObject({ key: 'example.com', cost: 0.02, error: null });
+    expect(rows[1].value).toEqual([{ keyword: 'seo', position: 3, url: 'https://example.com/' }, { keyword: 'crawler', position: 3, url: 'https://example.com/' }]);
+    db.close();
+  });
+
+  it('records the refusal and spends nothing when the switch is off', async () => {
+    writeSettings({ paidApis: false });
+    const fetchImpl = vi.fn();
+    const db = crawlDb();
+    await enrichCrawl(db, new DataForSeo(secrets, cache, fetchImpl as never), plan);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(readPaidData(db).every((r) => r.error?.includes('switched off'))).toBe(true);
+    db.close();
+    writeSettings({ paidApis: true });
+  });
+
+  it('runs a saved plan only once, and only after the crawl finishes', async () => {
+    const fetchImpl = vi.fn(answers);
+    const client = new DataForSeo(secrets, cache, fetchImpl as never);
+    const db = crawlDb();
+    savePaidPlan(db, { backlinks: true, volume: false, rank: false, keywords: [] });
+    setMeta(db, 'status', 'paused');
+    await runSavedPaidPlan(db, client);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    setMeta(db, 'status', 'finished');
+    await runSavedPaidPlan(db, client);
+    await runSavedPaidPlan(db, client);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     db.close();
   });
 });

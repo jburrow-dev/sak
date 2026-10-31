@@ -4,6 +4,7 @@ import { createCrawlDb, getMeta, openCrawlDb, setMeta, type Db } from './db.ts';
 import { compileFilters, isInternal, normalizeUrl, siteHost } from './url.ts';
 import { parseHtml, parseLinkHeader } from './parse.ts';
 import { HttpFetcher, type Fetcher, type FetchResult } from './fetcher.ts';
+import { ChromeRenderer, RenderingFetcher } from './render.ts';
 import { RobotsCache } from './robots.ts';
 import { collectSitemapUrls } from './sitemap.ts';
 import { runAnalysis } from './analysis.ts';
@@ -74,7 +75,7 @@ class Crawl {
     this.db = db;
     this.config = config;
     this.options = options;
-    this.fetcher = options.fetcher ?? new HttpFetcher();
+    this.fetcher = options.fetcher ?? (config.renderJs ? new RenderingFetcher(new HttpFetcher(), new ChromeRenderer(config.userAgent)) : new HttpFetcher());
     this.robots = new RobotsCache(config, this.fetcher);
     this.limiter = new HostRateLimiter(config.requestsPerSecond);
     this.allowed = compileFilters(config.include, config.exclude);
@@ -90,8 +91,8 @@ class Crawl {
         VALUES (@urlId, @status, @contentType, @redirectTarget, @xRobots, @linkCanonical, @responseMs, @bytes, @error, @blockedReason, @fetchedAt)`),
       insertLink: db.prepare('INSERT INTO links (source_id, target_id, type, anchor, nofollow) VALUES (?, ?, ?, ?, ?)'),
       deleteLinks: db.prepare('DELETE FROM links WHERE source_id = ?'),
-      insertPage: db.prepare(`INSERT OR REPLACE INTO page_elements (url_id, titles, meta_descriptions, h1s, meta_robots, canonicals, word_count, text_hash, html_bytes, script_count, has_empty_app_root)
-        VALUES (@urlId, @titles, @metaDescriptions, @h1s, @metaRobots, @canonicals, @wordCount, @textHash, @htmlBytes, @scriptCount, @hasEmptyAppRoot)`),
+      insertPage: db.prepare(`INSERT OR REPLACE INTO page_elements (url_id, titles, meta_descriptions, h1s, h2s, meta_robots, canonicals, word_count, text_hash, html_bytes, script_count, has_empty_app_root, rendered, raw_word_count, js_only_links, render_error)
+        VALUES (@urlId, @titles, @metaDescriptions, @h1s, @h2s, @metaRobots, @canonicals, @wordCount, @textHash, @htmlBytes, @scriptCount, @hasEmptyAppRoot, @rendered, @rawWordCount, @jsOnlyLinks, @renderError)`),
       deleteHreflang: db.prepare('DELETE FROM hreflang WHERE url_id = ?'),
       insertHreflang: db.prepare('INSERT INTO hreflang (url_id, lang, href) VALUES (?, ?, ?)'),
       deleteJsonLd: db.prepare('DELETE FROM structured_data WHERE url_id = ?'),
@@ -123,11 +124,11 @@ class Crawl {
     return Number(this.statements.insertUrl.run(url, kind, depth).lastInsertRowid);
   }
 
-  private enqueueImage(url: string): number | null {
+  private enqueueAsset(url: string, kind: 'image' | 'css' | 'script'): number | null {
     const existing = this.statements.findUrl.get(url) as { id: number } | undefined;
     if (existing) return existing.id;
-    if (!this.config.checkImages) return null;
-    return Number(this.statements.insertUrl.run(url, 'image', null).lastInsertRowid);
+    if (!(kind === 'image' ? this.config.checkImages : this.config.checkResources)) return null;
+    return Number(this.statements.insertUrl.run(url, kind, null).lastInsertRowid);
   }
 
   private async seed(): Promise<void> {
@@ -158,7 +159,9 @@ class Crawl {
     const isRedirect = result.status >= 300 && result.status < 400 && location;
     const redirectTarget = isRedirect ? normalizeUrl(location, url) : null;
     const linkHeader = parseLinkHeader(result.headers.get('link'), url);
-    const facts: PageFacts | null = result.body !== null && result.status < 300 ? parseHtml(result.body, url) : null;
+    const facts: PageFacts | null = result.body !== null && result.status < 300 ? parseHtml(result.body, result.finalUrl ?? url) : null;
+    const raw = facts && result.rawBody !== undefined ? parseHtml(result.rawBody, url) : null;
+    const rawLinks = new Set(raw?.links.map((link) => link.url));
 
     this.db.transaction(() => {
       this.statements.insertResponse.run({
@@ -186,6 +189,7 @@ class Crawl {
         titles: JSON.stringify(facts.titles),
         metaDescriptions: JSON.stringify(facts.metaDescriptions),
         h1s: JSON.stringify(facts.h1s),
+        h2s: JSON.stringify(facts.h2s),
         metaRobots: JSON.stringify(facts.metaRobots),
         canonicals: JSON.stringify(facts.canonicals),
         wordCount: facts.wordCount,
@@ -193,11 +197,17 @@ class Crawl {
         htmlBytes: facts.htmlBytes,
         scriptCount: facts.scriptCount,
         hasEmptyAppRoot: facts.hasEmptyAppRoot ? 1 : 0,
+        rendered: raw ? 1 : 0,
+        rawWordCount: raw?.wordCount ?? null,
+        jsOnlyLinks: raw ? new Set(facts.links.filter((link) => link.type === 'a' && !rawLinks.has(link.url)).map((link) => link.url)).size : null,
+        renderError: result.renderError ?? null,
       });
       const nextDepth = depth === null ? null : depth + 1;
       const followLinks = !this.hasNofollow(facts, result.headers.get('x-robots-tag'));
       for (const link of facts.links) {
-        const targetId = link.type === 'img' ? this.enqueueImage(link.url) : followLinks && !link.nofollow ? this.enqueue(link.url, nextDepth) : this.knownId(link.url);
+        const targetId = link.type !== 'a'
+          ? this.enqueueAsset(link.url, link.type === 'img' ? 'image' : link.type)
+          : followLinks && !link.nofollow ? this.enqueue(link.url, nextDepth) : this.knownId(link.url);
         if (targetId !== null) this.statements.insertLink.run(urlId, targetId, link.type, link.anchor, link.nofollow ? 1 : 0);
       }
       const hreflang = [...facts.hreflang, ...linkHeader.hreflang];
@@ -232,14 +242,21 @@ class Crawl {
     });
   }
 
-  private async fetchWithRetry(url: string, readBody: boolean): Promise<FetchResult> {
+  private async fetchWithRetry(url: string, kind: UrlKind): Promise<FetchResult> {
     const headers = { accept: 'text/html,application/xhtml+xml,*/*;q=0.8', ...this.config.headers, 'user-agent': this.config.userAgent };
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.config.retries; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
       await this.limiter.wait(url);
       try {
-        const result = await this.fetcher.fetch({ url, headers, timeoutMs: this.config.timeoutMs, readBody });
+        const result = await this.fetcher.fetch({
+          url,
+          headers,
+          timeoutMs: this.config.timeoutMs,
+          readBody: kind === 'page',
+          measureBody: kind === 'css' || kind === 'script',
+          pace: () => this.limiter.wait(url),
+        });
         const retryable = result.status >= 500 && attempt < this.config.retries;
         if (!retryable) return result;
       } catch (error) {
@@ -259,7 +276,7 @@ class Crawl {
           return;
         }
       }
-      const result = await this.fetchWithRetry(row.url, row.kind === 'page');
+      const result = await this.fetchWithRetry(row.url, row.kind);
       status = result.status;
       this.store(row.id, row.kind, row.depth, row.url, result);
     } catch (error) {
@@ -272,20 +289,25 @@ class Crawl {
   }
 
   async run(): Promise<void> {
-    await this.seed();
-    const inFlight = new Set<Promise<void>>();
-    while (!this.options.signal?.aborted) {
-      while (inFlight.size < this.config.concurrency) {
-        const row = this.statements.nextPending.get() as { id: number; url: string; kind: UrlKind; depth: number | null } | undefined;
-        if (!row) break;
-        this.statements.setState.run('in_progress', row.id);
-        const task: Promise<void> = this.processOne(row).finally(() => inFlight.delete(task));
-        inFlight.add(task);
+    await this.fetcher.prepare?.();
+    try {
+      await this.seed();
+      const inFlight = new Set<Promise<void>>();
+      while (!this.options.signal?.aborted) {
+        while (inFlight.size < this.config.concurrency) {
+          const row = this.statements.nextPending.get() as { id: number; url: string; kind: UrlKind; depth: number | null } | undefined;
+          if (!row) break;
+          this.statements.setState.run('in_progress', row.id);
+          const task: Promise<void> = this.processOne(row).finally(() => inFlight.delete(task));
+          inFlight.add(task);
+        }
+        if (inFlight.size === 0) break;
+        await Promise.race(inFlight);
       }
-      if (inFlight.size === 0) break;
-      await Promise.race(inFlight);
+      await Promise.all(inFlight);
+    } finally {
+      await this.fetcher.close?.();
     }
-    await Promise.all(inFlight);
   }
 }
 
@@ -309,7 +331,8 @@ function runCrawl(id: string, db: Db, config: CrawlConfig, options: CrawlOptions
   );
 }
 
-export async function startCrawl(input: Partial<CrawlConfig> & { startUrl: string }, options: CrawlOptions = {}, id?: string): Promise<string> {
+/** Applies defaults and rejects bad input, before anything is created. */
+export function resolveCrawlConfig(input: Partial<CrawlConfig> & { startUrl: string }): CrawlConfig {
   const startUrl = normalizeUrl(input.startUrl);
   if (!startUrl) throw new Error(`Not a valid http(s) URL: ${input.startUrl}`);
   const config: CrawlConfig = { ...DEFAULT_CONFIG, ...input, startUrl };
@@ -322,11 +345,16 @@ export async function startCrawl(input: Partial<CrawlConfig> & { startUrl: strin
     }
     return url;
   });
-  const crawlId = id ?? newCrawlId(startUrl);
+  return config;
+}
+
+export async function startCrawl(input: Partial<CrawlConfig> & { startUrl: string }, options: CrawlOptions = {}, id?: string): Promise<string> {
+  const config = resolveCrawlConfig(input);
+  const crawlId = id ?? newCrawlId(config.startUrl);
   const db = createCrawlDb(crawlId);
   try {
     setMeta(db, 'config', JSON.stringify(config));
-    setMeta(db, 'start_url', startUrl);
+    setMeta(db, 'start_url', config.startUrl);
     setMeta(db, 'started_at', new Date().toISOString());
     await runCrawl(crawlId, db, config, options);
   } finally {

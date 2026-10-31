@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
-import { openCrawlDb } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, googleLogin, importAnalytics, importSearchConsole, pagesForSpeedTest, runPageSpeed } from '@sak/integrations';
+import { openCrawlDb, readSettings, withCrawl, writeSettings } from '@sak/core';
+import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, googleLogin, importAnalytics, importSearchConsole, pagesForSpeedTest, readPaidData, runPageSpeed, runSavedPaidPlan } from '@sak/integrations';
 
 const KEYS: Record<string, string> = {
   dataforseo: 'DataForSEO login:password',
@@ -21,6 +21,23 @@ function promptHidden(label: string): Promise<string> {
   }));
 }
 
+export async function runPaidPlan(id: string): Promise<void> {
+  const db = openCrawlDb(id);
+  const cache = new ApiCache();
+  try {
+    await runSavedPaidPlan(db, new DataForSeo(new KeychainStore(), cache));
+  } finally {
+    cache.close();
+    db.close();
+  }
+}
+
+export function printPaidData(id: string): void {
+  for (const row of withCrawl(id, readPaidData)) {
+    console.log(row.error ? `paid  ${row.kind}: ${row.error}` : `paid  ${row.kind} ($${row.cost.toFixed(4)}): ${JSON.stringify(row.value)}`);
+  }
+}
+
 export async function runIntegrationCommand(command: string, positionals: string[], values: Record<string, any>): Promise<boolean> {
   const secrets = new KeychainStore();
   const where = { location: Number(values.location ?? 2840), language: values.language ?? 'en' };
@@ -36,6 +53,12 @@ export async function runIntegrationCommand(command: string, positionals: string
   };
 
   switch (command) {
+    case 'paid': {
+      if (positionals[0] && positionals[0] !== 'on' && positionals[0] !== 'off') throw new Error('Usage: sak paid [on|off]');
+      const { paidApis } = positionals[0] ? writeSettings({ paidApis: positionals[0] === 'on' }) : readSettings();
+      console.log(paidApis ? 'Paid APIs are on. Each spend still needs confirming.' : 'Paid APIs are off. Nothing can spend, and cached results still work.');
+      return true;
+    }
     case 'key': {
       if (positionals[0] === 'status') {
         for (const [name, label] of Object.entries(KEYS)) console.log(`${(await secrets.get(name)) ? 'set    ' : 'not set'}  ${name} (${label})`);
@@ -95,7 +118,8 @@ export async function runIntegrationCommand(command: string, positionals: string
           const spend = cache.spend();
           console.log(`Spent through SAK: $${spend.total.toFixed(4)} over ${spend.calls} calls`);
           for (const row of spend.byEndpoint) console.log(`  $${row.cost.toFixed(4)}  ${row.calls} calls  ${row.endpoint}`);
-          if (await secrets.get('dataforseo')) console.log(`Account balance: $${await client.balance()}`);
+          if (!readSettings().paidApis) console.log('Paid APIs are off, so the balance was not checked.');
+          else if (await secrets.get('dataforseo')) console.log(`Account balance: $${await client.balance()}`);
         } else if (command === 'kw') {
           const answer = await paid((o) => client.keywordVolume(positionals, where, o));
           if (answer) { console.table(answer.value); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }

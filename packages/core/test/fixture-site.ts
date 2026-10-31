@@ -61,7 +61,13 @@ export function startFixtureSite(port = 0): Promise<{ server: Server; origin: st
               `<a href="${origin.replace('127.0.0.1', 'localhost')}/ext-ok">ok</a><a href="${origin.replace('127.0.0.1', 'localhost')}/ext-404">gone</a><a href="${origin.replace('127.0.0.1', 'localhost')}/ext-403">refused</a>`,
           }));
         case '/good':
-          return html(page(path, { head: canonical(path), body: `${link('/')}<img src="/missing.png" alt="gone">` }));
+          return html(page(path, { head: `${canonical(path)}<link rel="stylesheet" href="/style.css">`, body: `${link('/')}<img src="/missing.png" alt="gone"><script src="/app.js"></script>` }));
+        case '/style.css':
+          res.writeHead(200, { 'content-type': 'text/css' });
+          return res.end('body { margin: 0 }');
+        case '/app.js':
+          res.writeHead(200, { 'content-type': 'text/javascript' });
+          return res.end('console.log(1)');
         case '/orphan':
           return html(page(path, { head: canonical(path) }));
         case '/redirect-one':
@@ -98,7 +104,7 @@ export function startFixtureSite(port = 0): Promise<{ server: Server; origin: st
         case '/schema':
           return html(page(path, { head: `${canonical(path)}<script type="application/ld+json">{not json}</script><script type="application/ld+json">{"@context":"https://schema.org","@type":"Article"}</script>` }));
         case '/thin':
-          return html(page(path, { head: canonical(path), text: 'Too few words here.' }));
+          return html(page(path, { head: `${canonical(path)}<link rel="stylesheet" href="/gone.css">`, text: 'Too few words here.' }));
         case '/no-tags':
           return html(page(path, { title: null, meta: null, h1: [] }));
         case '/two-titles':

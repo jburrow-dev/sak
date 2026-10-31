@@ -17,6 +17,10 @@ export interface CrawlConfig {
   useSitemaps: boolean;
   checkExternal: boolean;
   checkImages: boolean;
+  /** Fetch linked stylesheets and scripts. */
+  checkResources: boolean;
+  /** Render pages in Chrome, so content and links added by JavaScript are seen. */
+  renderJs: boolean;
   /** Treat subdomains of the start URL's host as part of the site. */
   crawlSubdomains: boolean;
   /** Extra in-scope URLs to start from, for sections nothing links to. */
@@ -39,16 +43,18 @@ export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
   useSitemaps: true,
   checkExternal: true,
   checkImages: true,
+  checkResources: true,
+  renderJs: false,
   crawlSubdomains: false,
   seeds: [],
 };
 
-export type UrlKind = 'page' | 'external' | 'image';
+export type UrlKind = 'page' | 'external' | 'image' | 'css' | 'script';
 export type UrlState = 'pending' | 'in_progress' | 'done' | 'blocked_robots';
 
 export interface LinkOut {
   url: string;
-  type: 'a' | 'img';
+  type: 'a' | 'img' | 'css' | 'script';
   anchor: string;
   nofollow: boolean;
 }
@@ -67,6 +73,7 @@ export interface PageFacts {
   titles: string[];
   metaDescriptions: string[];
   h1s: string[];
+  h2s: string[];
   metaRobots: string[];
   canonicals: string[];
   hreflang: HreflangEntry[];
@@ -113,6 +120,10 @@ export interface PageRow {
   html_bytes: number;
   script_count: number;
   has_empty_app_root: number;
+  rendered: number;
+  raw_word_count: number | null;
+  js_only_links: number | null;
+  render_error: string | null;
 }
 
 export interface IssueFinding {

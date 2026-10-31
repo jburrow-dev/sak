@@ -2,10 +2,11 @@
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import {
-  compareCrawls, crawlOverview, exportCsv, issuesSummary, listCrawls, listIssues, openCrawlDb, resumeCrawl, startCrawl, urlInfo, withCrawl,
+  compareCrawls, crawlOverview, createCrawlDb, exportCsv, issuesSummary, listCrawls, listIssues, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, urlInfo, withCrawl,
   type CrawlConfig, type CrawlProgress, type ExportKind,
 } from '@sak/core';
-import { runIntegrationCommand } from './integrations.ts';
+import { PaidApisDisabled, emptyPlan, estimatePlan, savePaidPlan, type PaidPlan } from '@sak/integrations';
+import { printPaidData, runIntegrationCommand, runPaidPlan } from './integrations.ts';
 
 const USAGE = `sak: local SEO crawler
 
@@ -13,7 +14,8 @@ Crawling
   sak crawl <url> [--max-urls N] [--max-depth N] [--rate N] [--concurrency N]
                   [--include REGEX]... [--exclude REGEX]... [--user-agent UA] [--header "K: V"]...
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
-                  [--subdomains] [--seed URL]...
+                  [--no-resources] [--render] [--subdomains] [--seed URL]...
+                  [--backlinks] [--keywords "a,b" --volume --rank] [--yes]
   sak resume <id>
   sak list
 
@@ -35,8 +37,10 @@ Integrations
   sak backlinks <domain> [--refresh] [--yes]
   sak rank <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
   sak cost
+  sak paid [on|off]
 
-A crawl can be stopped with Ctrl-C and continued later with sak resume.`;
+A crawl can be stopped with Ctrl-C and continued later with sak resume.
+--backlinks, --volume and --rank collect paid DataForSEO data once the crawl finishes.`;
 
 function progressLine(progress: CrawlProgress) {
   process.stderr.write(`\r\x1b[K${progress.fetched} fetched, ${progress.pending} queued  ${progress.status ?? '---'} ${progress.url.slice(0, 80)}`);
@@ -75,7 +79,8 @@ async function main() {
       include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true },
       'user-agent': { type: 'string' }, header: { type: 'string', multiple: true },
       robots: { type: 'string' }, 'robots-file': { type: 'string' },
-      'no-sitemaps': { type: 'boolean' }, 'no-external': { type: 'boolean' }, 'no-images': { type: 'boolean' }, subdomains: { type: 'boolean' }, seed: { type: 'string', multiple: true },
+      'no-sitemaps': { type: 'boolean' }, 'no-external': { type: 'boolean' }, 'no-images': { type: 'boolean' }, 'no-resources': { type: 'boolean' }, render: { type: 'boolean' }, subdomains: { type: 'boolean' }, seed: { type: 'string', multiple: true },
+      backlinks: { type: 'boolean' }, keywords: { type: 'string' }, volume: { type: 'boolean' }, rank: { type: 'boolean' },
       type: { type: 'string' }, limit: { type: 'string' }, kind: { type: 'string' }, out: { type: 'string' }, port: { type: 'string' },
       property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
@@ -109,14 +114,40 @@ async function main() {
       if (values['no-sitemaps']) config.useSitemaps = false;
       if (values['no-external']) config.checkExternal = false;
       if (values['no-images']) config.checkImages = false;
+      if (values['no-resources']) config.checkResources = false;
+      if (values.render) config.renderJs = true;
       if (values.subdomains) config.crawlSubdomains = true;
       if (values.seed) config.seeds = values.seed;
-      printFinished(await startCrawl(config, { onProgress: progressLine, signal: stopOnInterrupt() }));
+      const resolved = resolveCrawlConfig(config);
+      const plan: PaidPlan = {
+        backlinks: Boolean(values.backlinks),
+        volume: Boolean(values.volume),
+        rank: Boolean(values.rank),
+        keywords: (values.keywords ?? '').split(',').map((k) => k.trim()).filter(Boolean),
+        location: values.location ? Number(values.location) : undefined,
+        language: values.language,
+      };
+      const id = newCrawlId(resolved.startUrl);
+      if (!emptyPlan(plan)) {
+        if (!readSettings().paidApis) throw new PaidApisDisabled();
+        if (!values.yes) {
+          console.log(`This crawl's paid data will cost up to $${estimatePlan(plan).toFixed(3)}. Nothing was crawled. Re-run with --yes to spend it.`);
+          return;
+        }
+        const db = createCrawlDb(id);
+        savePaidPlan(db, plan);
+        db.close();
+      }
+      printFinished(await startCrawl(resolved, { onProgress: progressLine, signal: stopOnInterrupt() }, id));
+      await runPaidPlan(id);
+      printPaidData(id);
       return;
     }
     case 'resume': {
       if (!positionals[0]) throw new Error('Usage: sak resume <id>');
       printFinished(await resumeCrawl(positionals[0], { onProgress: progressLine, signal: stopOnInterrupt() }));
+      await runPaidPlan(positionals[0]);
+      printPaidData(positionals[0]);
       return;
     }
     case 'list': {

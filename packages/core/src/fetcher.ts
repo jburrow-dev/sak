@@ -4,6 +4,10 @@ export interface FetchRequest {
   timeoutMs: number;
   /** When false only the status and headers matter, so the body is discarded. */
   readBody: boolean;
+  /** Reads a non-HTML body only to measure its size. */
+  measureBody?: boolean;
+  /** Waits for the rate limiter, for fetchers that make a second request to the same host. */
+  pace?: () => Promise<void>;
 }
 
 export interface FetchResult {
@@ -12,17 +16,24 @@ export interface FetchResult {
   body: string | null;
   bytes: number | null;
   elapsedMs: number;
+  /** The HTML as served, when body holds the rendered DOM. */
+  rawBody?: string;
+  /** Where the page ended up, when its JavaScript navigated away. */
+  finalUrl?: string;
+  renderError?: string;
 }
 
-/** The seam a future Playwright renderer plugs into. */
 export interface Fetcher {
   fetch(request: FetchRequest): Promise<FetchResult>;
+  /** Fails before any crawling starts if the fetcher can't run. */
+  prepare?(): Promise<void>;
+  close?(): Promise<void>;
 }
 
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
 
 export class HttpFetcher implements Fetcher {
-  async fetch({ url, headers, timeoutMs, readBody }: FetchRequest): Promise<FetchResult> {
+  async fetch({ url, headers, timeoutMs, readBody, measureBody }: FetchRequest): Promise<FetchResult> {
     const started = performance.now();
     const response = await fetch(url, {
       headers,
@@ -37,6 +48,8 @@ export class HttpFetcher implements Fetcher {
       const buffer = Buffer.from(await response.arrayBuffer());
       bytes = buffer.byteLength;
       body = buffer.subarray(0, MAX_BODY_BYTES).toString('utf8');
+    } else if (measureBody) {
+      bytes = (await response.arrayBuffer()).byteLength;
     } else {
       await response.body?.cancel();
     }

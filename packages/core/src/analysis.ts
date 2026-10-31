@@ -80,6 +80,10 @@ export function runAnalysis(db: Db): void {
         hreflang: hreflangByUrl.get(page.url) ?? [],
         jsonLd: jsonLdById.get(page.url_id) ?? [],
         indexable: rowById.get(page.url_id)?.indexable === 1,
+        rendered: page.rendered === 1,
+        rawWordCount: page.raw_word_count,
+        jsOnlyLinks: page.js_only_links,
+        renderError: page.render_error,
       };
       return runPageChecks(input);
   });

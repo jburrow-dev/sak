@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { openCrawlDb } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, importAnalytics, importSearchConsole, pagesForSpeedTest, runPageSpeed } from '@sak/integrations';
+import { openCrawlDb, readSettings } from '@sak/core';
+import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, PaidApisDisabled, emptyPlan, enrichCrawl, estimatePlan, importAnalytics, importSearchConsole, pagesForSpeedTest, readPaidData, runPageSpeed } from '@sak/integrations';
 
 type Reply = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
@@ -29,6 +29,18 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
     }
   };
 
+  const withWritableCrawl = async (id: string, run: (db: ReturnType<typeof openCrawlDb>) => Promise<unknown>): Promise<Reply> => {
+    let db: ReturnType<typeof openCrawlDb> | undefined;
+    try {
+      db = openCrawlDb(id);
+      return json(await run(db));
+    } catch (error) {
+      return failure((error as Error).message);
+    } finally {
+      db?.close();
+    }
+  };
+
   server.registerTool('kw_volume', {
     description: 'Paid. Google Ads search volume, CPC and competition for up to 1,000 keywords. Cached results are free. Without confirm it returns the estimated cost and spends nothing.',
     inputSchema: { keywords: z.array(z.string()).min(1).max(1000), ...whereFields, confirm: confirmField, refresh: refreshField },
@@ -46,28 +58,43 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
   }, ({ domain, keywords, location, language, confirm, refresh }) =>
     paid((client) => client.rankCheck(domain, keywords, { location: location ?? 2840, language: language ?? 'en' }, { confirmed: confirm, refresh })));
 
-  server.registerTool('api_costs', { description: 'DataForSEO spend recorded by SAK and the current account balance.' }, () =>
+  server.registerTool('crawl_enrich', {
+    description: 'Paid. Store DataForSEO data with a finished crawl: backlinks for its domain, and search volume or rank for the given keywords. Without confirm it returns the most it can cost and spends nothing. Without any options it returns what is already stored.',
+    inputSchema: {
+      id: z.string(),
+      backlinks: z.boolean().optional(),
+      volume: z.boolean().optional(),
+      rank: z.boolean().optional(),
+      keywords: z.array(z.string()).max(1000).optional(),
+      ...whereFields,
+      confirm: confirmField,
+    },
+  }, ({ id, backlinks, volume, rank, keywords, location, language, confirm }) => {
+    const plan = { backlinks: Boolean(backlinks), volume: Boolean(volume), rank: Boolean(rank), keywords: keywords ?? [], location, language };
+    return withWritableCrawl(id, async (db) => {
+      if (emptyPlan(plan)) return readPaidData(db);
+      if (!readSettings().paidApis) throw new PaidApisDisabled();
+      if (!confirm) return { needs_confirmation: true, estimated_cost_usd: estimatePlan(plan), message: 'Cached results are free, so it may cost less. Confirm to continue.' };
+      const cache = new ApiCache();
+      try {
+        await enrichCrawl(db, new DataForSeo(secrets, cache), plan);
+        return readPaidData(db);
+      } finally {
+        cache.close();
+      }
+    });
+  });
+
+  server.registerTool('api_costs', { description: 'DataForSEO spend recorded by SAK and the current account balance. The balance is null while paid APIs are switched off.' }, () =>
     paid(async (client) => {
       const cache = new ApiCache();
       try {
-        const balance = (await secrets.get('dataforseo')) ? await client.balance() : null;
+        const balance = readSettings().paidApis && (await secrets.get('dataforseo')) ? await client.balance() : null;
         return { ...cache.spend(), balance };
       } finally {
         cache.close();
       }
     }));
-
-  const withWritableCrawl = async (id: string, run: (db: ReturnType<typeof openCrawlDb>) => Promise<unknown>): Promise<Reply> => {
-    let db: ReturnType<typeof openCrawlDb> | undefined;
-    try {
-      db = openCrawlDb(id);
-      return json(await run(db));
-    } catch (error) {
-      return failure((error as Error).message);
-    } finally {
-      db?.close();
-    }
-  };
 
   server.registerTool('gsc_import', {
     description: 'Load Search Console clicks and impressions into a crawl. Requires sak google login.',
