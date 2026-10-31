@@ -1,4 +1,4 @@
-import type { IssueFinding } from '../types.ts';
+import type { IssueFinding, PageSignals } from '../types.ts';
 import { metaWidth, titleWidth } from './pixels.ts';
 
 export interface PageInput {
@@ -19,7 +19,14 @@ export interface PageInput {
   rawWordCount?: number | null;
   jsOnlyLinks?: number | null;
   renderError?: string | null;
+  signals?: PageSignals | null;
 }
+
+/** Common schema.org subtypes of LocalBusiness, so a Plumber gets the same checks as its parent. */
+const LOCAL_BUSINESS_SUBTYPES = new Set(['AnimalShelter', 'ArchiveOrganization', 'AutomotiveBusiness', 'AutoBodyShop', 'AutoDealer', 'AutoRepair', 'ChildCare', 'Dentist', 'DryCleaningOrLaundry', 'EmergencyService', 'EmploymentAgency', 'EntertainmentBusiness', 'FinancialService', 'AccountingService', 'InsuranceAgency', 'FoodEstablishment', 'Bakery', 'BarOrPub', 'CafeOrCoffeeShop', 'Restaurant', 'GovernmentOffice', 'HealthAndBeautyBusiness', 'BeautySalon', 'DaySpa', 'HairSalon', 'HomeAndConstructionBusiness', 'Electrician', 'GeneralContractor', 'HVACBusiness', 'HousePainter', 'Locksmith', 'MovingCompany', 'Plumber', 'RoofingContractor', 'InternetCafe', 'LegalService', 'Attorney', 'Notary', 'Library', 'LodgingBusiness', 'Hotel', 'MedicalBusiness', 'Physician', 'ProfessionalService', 'RadioStation', 'RealEstateAgent', 'RecyclingCenter', 'SelfStorage', 'ShoppingCenter', 'SportsActivityLocation', 'Store', 'TelevisionStation', 'TouristInformationCenter', 'TravelAgency']);
+
+const SOFT_404 = /\b(404|page not found|not found|page (doesn't|does not|no longer) exists?|no longer available)\b/i;
+const SOFT_404_MAX_WORDS = 200;
 
 const REQUIRED_PROPERTIES: Record<string, string[]> = {
   Article: ['headline'],
@@ -108,6 +115,44 @@ function schemaNodes(value: unknown): Record<string, unknown>[] {
   return [];
 }
 
+/** Typed nodes inside another node, such as a Review on a Product. A bare {"@id": ...} is only a reference. */
+function nestedNodes(node: Record<string, unknown>): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (!value || typeof value !== 'object') return;
+    const child = value as Record<string, unknown>;
+    if (child['@type']) out.push(child);
+    Object.values(child).forEach(visit);
+  };
+  Object.entries(node).forEach(([key, value]) => {
+    if (key !== '@graph') visit(value);
+  });
+  return out;
+}
+
+/** Every schema.org type a JSON-LD block declares, at any depth. Blocks that don't parse give none. */
+export function schemaTypes(raw: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const names = schemaNodes(parsed).flatMap((node) => [node, ...nestedNodes(node)]).flatMap((node) => node['@type'] ?? []);
+  return [...new Set(names.map(String))];
+}
+
+const requiredFor = (name: string) => REQUIRED_PROPERTIES[name] ?? (LOCAL_BUSINESS_SUBTYPES.has(name) ? REQUIRED_PROPERTIES.LocalBusiness : []);
+
+function missingProperties(node: Record<string, unknown>, nested: boolean): string[] {
+  const type = node['@type'];
+  return (Array.isArray(type) ? type : [type]).flatMap((name) => requiredFor(String(name))
+    // A nested Review reviews the node it sits in, so it doesn't repeat itemReviewed.
+    .filter((property) => node[property] === undefined && !(nested && property === 'itemReviewed'))
+    .map((property) => `${name}: ${property}`));
+}
+
 export function checkStructuredData(page: PageInput): IssueFinding[] {
   const out: IssueFinding[] = [];
   for (const raw of page.jsonLd) {
@@ -123,15 +168,13 @@ export function checkStructuredData(page: PageInput): IssueFinding[] {
       out.push({ type: 'schema_bad_context', url: page.url, detail: context });
     }
     for (const node of schemaNodes(parsed)) {
-      const type = node['@type'];
-      if (!type) {
+      if (!node['@type']) {
         out.push({ type: 'schema_missing_type', url: page.url });
-        continue;
+      } else {
+        for (const detail of missingProperties(node, false)) out.push({ type: 'schema_missing_property', url: page.url, detail });
       }
-      for (const name of Array.isArray(type) ? type : [type]) {
-        for (const property of REQUIRED_PROPERTIES[String(name)] ?? []) {
-          if (node[property] === undefined) out.push({ type: 'schema_missing_property', url: page.url, detail: `${name}: ${property}` });
-        }
+      for (const child of nestedNodes(node)) {
+        for (const detail of missingProperties(child, true)) out.push({ type: 'schema_missing_property', url: page.url, detail });
       }
     }
   }
@@ -156,8 +199,43 @@ export function checkRendering(page: PageInput): IssueFinding[] {
   return out;
 }
 
+export function checkSoft404(page: PageInput): IssueFinding[] {
+  const heading = page.titles.find((t) => SOFT_404.test(t)) ?? page.h1s.find((h) => SOFT_404.test(h));
+  return heading && page.wordCount < SOFT_404_MAX_WORDS ? [{ type: 'soft_404', url: page.url, detail: heading.slice(0, 120) }] : [];
+}
+
+/** Older crawls have no signals, so these stay quiet rather than reporting every page. */
+export function checkHead(page: PageInput): IssueFinding[] {
+  const signals = page.signals;
+  if (!signals) return [];
+  const out: IssueFinding[] = [];
+  if (!signals.htmlLang) out.push({ type: 'html_lang_missing', url: page.url });
+  if (!signals.viewport) out.push({ type: 'viewport_missing', url: page.url });
+  if (!signals.ogTitle || !signals.ogImage) out.push({ type: 'open_graph_missing', url: page.url, detail: [!signals.ogTitle && 'og:title', !signals.ogImage && 'og:image'].filter(Boolean).join(', ') });
+  return out;
+}
+
+export function checkImages(page: PageInput): IssueFinding[] {
+  const signals = page.signals;
+  if (!signals) return [];
+  const out: IssueFinding[] = [];
+  if (signals.imagesNoAlt > 0) out.push({ type: 'image_alt_missing', url: page.url, detail: `${signals.imagesNoAlt} of ${signals.images} images` });
+  if (signals.imagesNoDimensions > 0) out.push({ type: 'image_no_dimensions', url: page.url, detail: `${signals.imagesNoDimensions} of ${signals.images} images` });
+  return out;
+}
+
+export function checkSnippetControls(page: PageInput): IssueFinding[] {
+  const directives = [...page.metaRobots, page.xRobots ?? ''].join(',');
+  const restrictive = /\bnosnippet\b/i.test(directives) ? 'nosnippet' : /\bmax-snippet\s*:\s*0\b/i.test(directives) ? 'max-snippet:0' : null;
+  return restrictive ? [{ type: 'ai_snippet_restricted', url: page.url, detail: restrictive }] : [];
+}
+
+export function checkRenderChanges(page: PageInput): IssueFinding[] {
+  return page.signals?.renderChanges?.length ? [{ type: 'render_changes_seo', url: page.url, detail: page.signals.renderChanges.join(', ') }] : [];
+}
+
 export function runPageChecks(page: PageInput): IssueFinding[] {
   // Snippet and content problems only matter on pages meant to appear in search.
-  const searchChecks = page.indexable ? [checkTitles, checkMeta, checkHeadings, checkContent] : [];
-  return [...searchChecks, checkDirectives, checkHreflang, checkStructuredData, checkRendering].flatMap((check) => check(page));
+  const searchChecks = page.indexable ? [checkTitles, checkMeta, checkHeadings, checkContent, checkSoft404, checkHead, checkImages, checkSnippetControls] : [];
+  return [...searchChecks, checkDirectives, checkHreflang, checkStructuredData, checkRendering, checkRenderChanges].flatMap((check) => check(page));
 }

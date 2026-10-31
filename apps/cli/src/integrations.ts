@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
-import { getMeta, openCrawlDb, readSettings, trafficPulls, withCrawl, writeSettings, type Db } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, KeychainStore, addBingKey, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAnalytics, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
+import { readFileSync } from 'node:fs';
+import { getMeta, openCrawlDb, readSettings, readSiteAudit, runAnalysis, trafficPulls, withCrawl, writeSettings, type Db } from '@sak/core';
+import { ApiCache, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, KeychainStore, addBingKey, budgetStatus, checkBudget, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAiExport, importAiReferrals, importAnalytics, importGbp, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runCrux, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type LlmEngine, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
 
 const KEYS: Record<string, string> = {
   dataforseo: 'DataForSEO login:password',
@@ -29,6 +30,16 @@ export async function runPaidPlan(id: string): Promise<void> {
   } finally {
     cache.close();
     db.close();
+  }
+}
+
+/** Fails before crawling, rather than after a long crawl has finished. */
+export function checkPlanBudget(estimate: number): void {
+  const cache = new ApiCache();
+  try {
+    checkBudget(cache, estimate);
+  } finally {
+    cache.close();
   }
 }
 
@@ -192,6 +203,11 @@ export async function runIntegrationCommand(command: string, positionals: string
         const run = command === 'gsc' ? importSearchConsole : importAnalytics;
         const result = await run(db, secrets, values.property, Number(values.days ?? 90), fetch, values.account);
         console.log(`Imported ${result.rows} rows: ${result.matched} match crawled URLs, ${result.unmatched} don't, ${result.dropped} are outside this crawl.`);
+        if (command === 'ga4') {
+          const ai = await importAiReferrals(db, secrets, values.property, Number(values.days ?? 90), fetch, values.account);
+          console.log(`Found ${ai.rows} rows of visits referred by AI products.`);
+        }
+        runAnalysis(db);
       } finally {
         db.close();
       }
@@ -204,7 +220,67 @@ export async function runIntegrationCommand(command: string, positionals: string
         const urls = values.url ?? pagesForSpeedTest(db, Number(values.limit ?? 10));
         const results = await runPageSpeed(db, secrets, urls, values.strategy === 'desktop' ? 'desktop' : 'mobile');
         for (const r of results) console.log(r.error ? `failed  ${r.url}  ${r.error}` : `${String(r.performance).padStart(3)}  LCP ${Math.round(r.lcp_ms ?? 0)}ms  CLS ${r.cls?.toFixed(3)}  ${r.url}`);
+        runAnalysis(db);
       } finally {
+        db.close();
+      }
+      return true;
+    }
+    case 'crux': {
+      if (!positionals[0]) throw new Error('Usage: sak crux <id>');
+      const db = openCrawlDb(positionals[0]);
+      try {
+        const rows = await runCrux(db, secrets);
+        if (rows.length === 0) console.log('Chrome has no real-user data for this site. That is normal for sites with little traffic.');
+        else console.table(rows);
+        runAnalysis(db);
+      } finally {
+        db.close();
+      }
+      return true;
+    }
+    case 'audit': {
+      if (!positionals[0]) throw new Error('Usage: sak audit <id>');
+      const audit = withCrawl(positionals[0], readSiteAudit);
+      console.log(audit ? JSON.stringify(audit, null, 2) : 'This crawl was saved before SAK audited site files. Crawl the site again to see them.');
+      return true;
+    }
+    case 'ai-import': {
+      if (!positionals[0] || !values.file || (values.source !== 'gsc' && values.source !== 'bing')) throw new Error('Usage: sak ai-import <id> --source gsc|bing --file PATH');
+      const db = openCrawlDb(positionals[0]);
+      try {
+        const result = importAiExport(db, values.source, readFileSync(values.file, 'utf8'));
+        console.log(`Imported ${result.rows} ${result.kind}${result.kind === 'pages' ? `, ${result.in_crawl} of them in this crawl` : ''}. Columns read: ${JSON.stringify(result.columns)}`);
+      } finally {
+        db.close();
+      }
+      return true;
+    }
+    case 'budget': {
+      const patch = {
+        ...(values.monthly ? { monthlyBudgetUsd: Number(values.monthly) } : {}),
+        ...(values.run ? { runBudgetUsd: Number(values.run) } : {}),
+      };
+      if (Object.values(patch).some((value) => !Number.isFinite(value) || value < 0)) throw new Error('Limits must be amounts in US dollars');
+      if (Object.keys(patch).length) writeSettings(patch);
+      const cache = new ApiCache();
+      try {
+        const status = budgetStatus(cache);
+        console.log(`Limit per run: $${status.run_budget_usd.toFixed(2)}\nLimit per month: $${status.monthly_budget_usd.toFixed(2)}\nSpent this month: $${status.spent_this_month_usd.toFixed(4)}`);
+      } finally {
+        cache.close();
+      }
+      return true;
+    }
+    case 'gbp': {
+      if (!positionals[0] || !positionals[1]) throw new Error('Usage: sak gbp <id> <name|cid:ID|place_id:ID> [--reviews 50] [--no-posts] [--yes]');
+      const db = openCrawlDb(positionals[0]);
+      const cache = new ApiCache();
+      try {
+        const answer = await paid((o) => importGbp(db, new DataForSeo(secrets, cache), { keyword: positionals[1], ...where, reviews: Number(values.reviews ?? 50), posts: !values['no-posts'] }, o));
+        if (answer) console.log(`${answer.profile.title}: ${answer.reviews ?? 0} reviews and ${answer.posts ?? 0} posts read. Cost: $${answer.cost.toFixed(4)}. See sak issues ${positionals[0]}.`);
+      } finally {
+        cache.close();
         db.close();
       }
       return true;
@@ -212,6 +288,10 @@ export async function runIntegrationCommand(command: string, positionals: string
     case 'kw':
     case 'backlinks':
     case 'rank':
+    case 'ai-overview':
+    case 'ai-mode':
+    case 'llm':
+    case 'llm-prompt':
     case 'cost': {
       const cache = new ApiCache();
       const client = new DataForSeo(secrets, cache);
@@ -228,6 +308,20 @@ export async function runIntegrationCommand(command: string, positionals: string
         } else if (command === 'backlinks') {
           const answer = await paid((o) => client.backlinkSummary(positionals[0], o));
           if (answer) { console.log(answer.value); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }
+        } else if (command === 'ai-overview') {
+          const answer = await paid((o) => client.aiOverviewKeywords(positionals[0], where, Number(values.limit ?? 100), o));
+          if (answer) { console.log(`Cited for ${answer.value.total ?? 'an unknown number of'} keywords.`); console.table(answer.value.keywords); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }
+        } else if (command === 'ai-mode') {
+          const [domain, ...keywords] = positionals;
+          const answer = await paid((o) => client.aiModeCheck(domain, keywords, where, o));
+          if (answer) { console.table(answer.value.map(({ sources, ...row }) => ({ ...row, sources: sources.length }))); console.log(`Cost: $${answer.cost.toFixed(4)}`); }
+        } else if (command === 'llm') {
+          const answer = await paid((o) => client.llmCitations([positionals[0], ...(values.competitor ?? [])], where, o));
+          if (answer) { console.log(JSON.stringify(answer.value, null, 2)); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }
+        } else if (command === 'llm-prompt') {
+          if (!positionals[0] || !values.engine || !values.model || !values.prompt) throw new Error('Usage: sak llm-prompt <domain> --engine ENGINE --model NAME --prompt TEXT');
+          const answer = await paid((o) => client.llmPrompt(values.engine as LlmEngine, values.prompt, values.model, { domain: positionals[0], brand: values.brand }, Number(values.samples ?? 3), o));
+          if (answer) { console.log(`Cited in ${answer.value.cited_in} of ${answer.value.samples} answers.${answer.value.brand_named_in === null ? '' : ` Brand named in ${answer.value.brand_named_in}.`}`); console.log(`Cost: $${answer.cost.toFixed(4)}`); }
         } else {
           const [domain, ...keywords] = positionals;
           const answer = await paid((o) => client.rankCheck(domain, keywords, where, o));

@@ -25,6 +25,8 @@ export interface CrawlConfig {
   crawlSubdomains: boolean;
   /** Extra in-scope URLs to start from, for sections nothing links to. */
   seeds: string[];
+  /** Request the start URL once as each AI bot's user agent. Only for sites you may test this way. */
+  probeAiBots: boolean;
 }
 
 export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
@@ -47,6 +49,7 @@ export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
   renderJs: false,
   crawlSubdomains: false,
   seeds: [],
+  probeAiBots: false,
 };
 
 export type UrlKind = 'page' | 'external' | 'image' | 'css' | 'script';
@@ -68,6 +71,34 @@ export interface JsonLdBlock {
   raw: string;
 }
 
+/** Smaller facts about a page, stored together because checks read them one at a time. */
+export interface PageSignals {
+  htmlLang: string | null;
+  viewport: boolean;
+  ogTitle: boolean;
+  ogImage: boolean;
+  twitterCard: boolean;
+  images: number;
+  imagesNoAlt: number;
+  imagesNoDimensions: number;
+  imagesLazy: number;
+  h3s: number;
+  h4to6s: number;
+  linksSponsored: number;
+  linksUgc: number;
+  simhash: string | null;
+  dateModified: string | null;
+  datePublished: string | null;
+  author: string | null;
+  questionHeadings: number;
+  lists: number;
+  tables: number;
+  firstParagraphWords: number | null;
+  dataNosnippet: number;
+  /** SEO elements that differ between the HTML as served and the rendered page. */
+  renderChanges?: string[];
+}
+
 /** Everything extracted from one HTML document. */
 export interface PageFacts {
   titles: string[];
@@ -84,6 +115,7 @@ export interface PageFacts {
   htmlBytes: number;
   scriptCount: number;
   hasEmptyAppRoot: boolean;
+  signals: PageSignals;
 }
 
 /** One row of crawl data as read back for checks and queries. */
@@ -105,6 +137,10 @@ export interface UrlRow {
   blocked_reason: string | null;
   indexable: number | null;
   indexability_reason: string | null;
+  content_encoding?: string | null;
+  cache_control?: string | null;
+  hsts?: string | null;
+  truncated?: number | null;
 }
 
 export interface PageRow {
@@ -124,6 +160,7 @@ export interface PageRow {
   raw_word_count: number | null;
   js_only_links: number | null;
   render_error: string | null;
+  signals: PageSignals | null;
 }
 
 export interface IssueFinding {

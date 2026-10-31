@@ -132,9 +132,62 @@ CREATE TABLE IF NOT EXISTS url_inspection (
   verdict TEXT, coverage_state TEXT, indexing_state TEXT, robots_state TEXT, page_fetch_state TEXT, last_crawl_time TEXT,
   google_canonical TEXT, user_canonical TEXT, error TEXT, fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS page_schema (
+  url_id INTEGER NOT NULL REFERENCES urls(id),
+  type TEXT NOT NULL,
+  PRIMARY KEY (url_id, type)
+);
+CREATE TABLE IF NOT EXISTS ai_bots (
+  name TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  robots_allowed INTEGER,
+  probe_status INTEGER,
+  probe_refused INTEGER
+);
+CREATE TABLE IF NOT EXISTS crux (
+  scope TEXT NOT NULL,
+  form_factor TEXT NOT NULL,
+  lcp_ms REAL, cls REAL, inp_ms REAL, fetched_at TEXT NOT NULL,
+  PRIMARY KEY (scope, form_factor)
+);
+CREATE TABLE IF NOT EXISTS ai_referrals (
+  url TEXT NOT NULL,
+  source TEXT NOT NULL,
+  sessions REAL, engaged_sessions REAL, key_events REAL,
+  PRIMARY KEY (url, source)
+);
+CREATE TABLE IF NOT EXISTS ai_search_pages (
+  source TEXT NOT NULL,
+  url TEXT NOT NULL,
+  impressions REAL, citations REAL,
+  in_crawl INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source, url)
+);
+CREATE TABLE IF NOT EXISTS ai_search_queries (
+  source TEXT NOT NULL,
+  query TEXT NOT NULL,
+  citations REAL, citation_share REAL,
+  PRIMARY KEY (source, query)
+);
+CREATE TABLE IF NOT EXISTS ai_citations (
+  url TEXT NOT NULL,
+  engine TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  volume REAL,
+  PRIMARY KEY (url, engine, subject)
+);
+CREATE TABLE IF NOT EXISTS gbp_profile (
+  key TEXT PRIMARY KEY,
+  title TEXT, category TEXT, additional_categories TEXT, description TEXT, address TEXT, phone TEXT, url TEXT, domain TEXT,
+  place_id TEXT, cid TEXT, is_claimed INTEGER, total_photos INTEGER, rating REAL, rating_votes INTEGER, rating_distribution TEXT,
+  has_hours INTEGER, attributes INTEGER, services INTEGER, place_topics TEXT, competitors TEXT,
+  reviews_fetched INTEGER, reviews_with_reply INTEGER, latest_review TEXT, reviews_last_90 INTEGER,
+  posts_fetched INTEGER, latest_post TEXT, fetched_at TEXT NOT NULL
+);
 `;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const ADDED_COLUMNS: Record<string, Record<string, string>> = {
   // h2s stays NULL on crawls saved before it existed, so they don't read as "no H2" on every page.
@@ -144,9 +197,17 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
     raw_word_count: 'INTEGER',
     js_only_links: 'INTEGER',
     render_error: 'TEXT',
+    // JSON. NULL on older crawls, so their checks skip it instead of reporting every page.
+    signals: 'TEXT',
   },
+  urls: { link_score: 'REAL' },
+  // An empty string means the header was absent. NULL means the crawl predates reading it.
+  responses: { content_encoding: 'TEXT', cache_control: 'TEXT', hsts: 'TEXT', truncated: 'INTEGER NOT NULL DEFAULT 0' },
   search_console: { source_url: 'TEXT' },
   analytics: { users: 'REAL', views: 'REAL', key_events: 'REAL', source_url: 'TEXT' },
+  pagespeed: { field_lcp_ms: 'REAL', field_cls: 'REAL' },
+  url_inspection: { rich_verdict: 'TEXT', rich_types: 'TEXT', rich_issues: 'TEXT' },
+  gbp_profile: { business_status: 'TEXT' },
 };
 
 function migrate(db: Db): void {

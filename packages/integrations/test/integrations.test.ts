@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCrawlDb, readSettings, setMeta, writeSettings, type Db } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, MemoryStore, PaidApisDisabled, dataForSeoBasicToken, emptyPlan, enrichCrawl, estimatePlan, readPaidData, runSavedPaidPlan, savePaidPlan, importAnalytics, importSearchConsole, pagesForSpeedTest, parsePageSpeed, runPageSpeed } from '../src/index.ts';
+import { ApiCache, CostConfirmationRequired, DataForSeo, ESTIMATED_COST, MemoryStore, PaidApisDisabled, dataForSeoBasicToken, emptyPlan, enrichCrawl, estimatePlan, readPaidData, runSavedPaidPlan, savePaidPlan, importAnalytics, importSearchConsole, pagesForSpeedTest, parsePageSpeed, runPageSpeed } from '../src/index.ts';
 
 let home: string;
 let cache: ApiCache;
@@ -90,9 +90,9 @@ describe('DataForSEO cost control', () => {
     const fetchImpl = vi.fn(async () => dfs(serp, 0.003));
     const client = new DataForSeo(secrets, cache, fetchImpl as never);
     const { value } = await client.rankCheck('www.example.com', ['a'], where, { confirmed: true });
-    expect(value).toEqual([{ keyword: 'a', position: 2, url: 'https://blog.example.com/x' }]);
+    expect(value).toEqual([{ keyword: 'a', position: 2, url: 'https://blog.example.com/x', ai_overview: false, ai_cited: false, ai_cited_url: null, ai_sources: [] }]);
     const blocked = await client.rankCheck('www.example.com', ['a', 'b'], where).catch((e) => e);
-    expect(blocked.estimate).toBeCloseTo(0.003);
+    expect(blocked.estimate).toBeCloseTo(ESTIMATED_COST.rankCheck);
     expect((await client.rankCheck('www.example.com', ['a'], where)).cost).toBe(0);
   });
 });
@@ -143,7 +143,7 @@ describe('PageSpeed', () => {
       lighthouseResult: { categories: { performance: { score: 0.87 } }, audits: { 'largest-contentful-paint': { numericValue: 2100 }, 'cumulative-layout-shift': { numericValue: 0.02 }, 'server-response-time': { numericValue: 300 } } },
       loadingExperience: { metrics: { INTERACTION_TO_NEXT_PAINT: { percentile: 180 } } },
     });
-    expect(parsed).toEqual({ url: 'u', strategy: 'mobile', performance: 87, lcp_ms: 2100, cls: 0.02, inp_ms: 180, ttfb_ms: 300 });
+    expect(parsed).toEqual({ url: 'u', strategy: 'mobile', performance: 87, lcp_ms: 2100, cls: 0.02, inp_ms: 180, ttfb_ms: 300, field_lcp_ms: null, field_cls: null });
   });
 
   it('keeps going when one URL fails and picks the most-linked pages', async () => {
@@ -225,7 +225,7 @@ describe('per-crawl paid data', () => {
     const rows = readPaidData(db);
     expect(rows.map((r) => r.kind)).toEqual(['backlinks', 'rank', 'volume']);
     expect(rows[0]).toMatchObject({ key: 'example.com', cost: 0.02, error: null });
-    expect(rows[1].value).toEqual([{ keyword: 'seo', position: 3, url: 'https://example.com/' }, { keyword: 'crawler', position: 3, url: 'https://example.com/' }]);
+    expect(rows[1].value).toEqual([{ keyword: 'seo', position: 3, url: 'https://example.com/', ai_overview: false, ai_cited: false, ai_cited_url: null, ai_sources: [] }, { keyword: 'crawler', position: 3, url: 'https://example.com/', ai_overview: false, ai_cited: false, ai_cited_url: null, ai_sources: [] }]);
     db.close();
   });
 

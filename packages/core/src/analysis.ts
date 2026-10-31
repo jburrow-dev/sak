@@ -2,12 +2,15 @@ import type { Db } from './db.ts';
 import { getMeta } from './db.ts';
 import type { PageRow, UrlRow } from './types.ts';
 import { ISSUES } from './checks/catalog.ts';
-import { runPageChecks, type PageInput } from './checks/page.ts';
-import { buildRedirectChains, runSiteChecks, type SiteInput } from './checks/site.ts';
+import { runAuditChecks } from './checks/audit.ts';
+import { runGbpChecks } from './checks/gbp.ts';
+import { runPageChecks, schemaTypes, type PageInput } from './checks/page.ts';
+import { buildRedirectChains, linkScores, runSiteChecks, type SiteInput } from './checks/site.ts';
 import { runTrafficChecks } from './checks/traffic.ts';
 
 export const URL_ROW_SQL = `SELECT u.id, u.url, u.kind, u.state, u.depth, u.in_sitemap, u.indexable, u.indexability_reason,
-  r.status, r.content_type, r.redirect_target, r.x_robots, r.link_canonical, r.response_ms, r.bytes, r.error, r.blocked_reason
+  r.status, r.content_type, r.redirect_target, r.x_robots, r.link_canonical, r.response_ms, r.bytes, r.error, r.blocked_reason,
+  r.content_encoding, r.cache_control, r.hsts, r.truncated
   FROM urls u LEFT JOIN responses r ON r.url_id = u.id`;
 
 const parse = (value: string): string[] => JSON.parse(value) as string[];
@@ -22,6 +25,7 @@ function readPages(db: Db): (PageRow & { link_canonical: string | null; x_robots
     h1s: parse(row.h1s),
     meta_robots: parse(row.meta_robots),
     canonicals: parse(row.canonicals),
+    signals: row.signals ? JSON.parse(row.signals) : null,
   }));
 }
 
@@ -85,6 +89,7 @@ export function runAnalysis(db: Db): void {
         rawWordCount: page.raw_word_count,
         jsOnlyLinks: page.js_only_links,
         renderError: page.render_error,
+        signals: page.signals,
       };
       return runPageChecks(input);
   });
@@ -98,19 +103,28 @@ export function runAnalysis(db: Db): void {
       meta: p.meta_descriptions.find((m) => m.length > 0) ?? null,
       textHash: p.text_hash,
       canonical: p.canonicals[0] ?? p.link_canonical,
+      simhash: p.signals?.simhash ?? null,
     })),
-    links: db.prepare('SELECT s.url AS source, t.url AS target, l.type FROM links l JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id').all() as SiteInput['links'],
+    links: db.prepare('SELECT s.url AS source, t.url AS target, l.type, l.anchor FROM links l JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id').all() as SiteInput['links'],
     hreflang,
   };
   const chains = buildRedirectChains(urls);
   findings.push(...runSiteChecks(site, chains));
   findings.push(...runTrafficChecks(db, urls));
+  findings.push(...runAuditChecks(db, startUrl, urls));
+  findings.push(...runGbpChecks(db, startUrl, urls));
+
+  const livePages = urls.filter((u) => u.kind === 'page' && u.status === 200).map((u) => u.url);
+  const followed = db.prepare(`SELECT s.url AS source, t.url AS target FROM links l JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id WHERE l.type = 'a' AND l.nofollow = 0`).all() as { source: string; target: string }[];
+  const scores = linkScores(livePages, followed);
 
   const urlIds = new Map(urls.map((u) => [u.url, u.id]));
   db.transaction(() => {
-    const setIndexable = db.prepare('UPDATE urls SET indexable = ?, indexability_reason = ? WHERE id = ?');
-    for (const row of urls) setIndexable.run(row.indexable, row.indexability_reason, row.id);
-    db.exec('DELETE FROM issues; DELETE FROM redirect_hops;');
+    const setIndexable = db.prepare('UPDATE urls SET indexable = ?, indexability_reason = ?, link_score = ? WHERE id = ?');
+    for (const row of urls) setIndexable.run(row.indexable, row.indexability_reason, scores.get(row.url) ?? null, row.id);
+    db.exec('DELETE FROM issues; DELETE FROM redirect_hops; DELETE FROM page_schema;');
+    const insertType = db.prepare('INSERT OR IGNORE INTO page_schema (url_id, type) VALUES (?, ?)');
+    for (const { url_id, raw } of jsonLd) for (const type of schemaTypes(raw)) insertType.run(url_id, type);
     const insertHop = db.prepare('INSERT INTO redirect_hops (start_id, hop, url, status) VALUES (?, ?, ?, ?)');
     for (const chain of chains) {
       const startId = urlIds.get(chain.start)!;

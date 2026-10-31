@@ -2,6 +2,8 @@ export * from './secrets.ts';
 export * from './cache.ts';
 export * from './dataforseo.ts';
 export * from './enrich.ts';
+export * from './gbp.ts';
+export * from './ai-import.ts';
 export * from './google.ts';
 export * from './pagespeed.ts';
 export * from './http.ts';

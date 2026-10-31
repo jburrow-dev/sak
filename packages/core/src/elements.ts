@@ -36,8 +36,18 @@ const PAGE_SOURCE = `SELECT u.id, u.url, u.state, u.depth, u.indexable, u.indexa
     COALESCE(json_extract(p.canonicals, '$[0]'), r.link_canonical) AS canonical,
     TRIM(COALESCE(json_extract(p.meta_robots, '$[0]'), '') || ' ' || COALESCE(r.x_robots, '')) AS directives,
     p.word_count, p.html_bytes, p.script_count, p.rendered, p.raw_word_count, p.js_only_links, p.render_error,
-    (SELECT COUNT(DISTINCT l.source_id) FROM links l WHERE l.target_id = u.id AND l.type = 'a') AS inlinks,
+    u.link_score, p.signals IS NOT NULL AS has_signals,
+    json_extract(p.signals, '$.htmlLang') AS html_lang, json_extract(p.signals, '$.viewport') AS viewport, json_extract(p.signals, '$.ogTitle') AS og_title, json_extract(p.signals, '$.ogImage') AS og_image, json_extract(p.signals, '$.twitterCard') AS twitter_card,
+    json_extract(p.signals, '$.images') AS images, json_extract(p.signals, '$.imagesNoAlt') AS images_no_alt, json_extract(p.signals, '$.imagesNoDimensions') AS images_no_dimensions, json_extract(p.signals, '$.imagesLazy') AS images_lazy,
+    json_extract(p.signals, '$.h3s') AS h3s, json_extract(p.signals, '$.linksSponsored') AS links_sponsored, json_extract(p.signals, '$.linksUgc') AS links_ugc,
+    json_extract(p.signals, '$.dateModified') AS date_modified, json_extract(p.signals, '$.datePublished') AS date_published, json_extract(p.signals, '$.author') AS author,
+    json_extract(p.signals, '$.questionHeadings') AS question_headings, json_extract(p.signals, '$.lists') AS lists, json_extract(p.signals, '$.tables') AS tables, json_extract(p.signals, '$.firstParagraphWords') AS first_paragraph_words,
+    json_extract(p.signals, '$.dataNosnippet') AS data_nosnippet,
+    r.content_encoding, r.cache_control,
+    (SELECT COUNT(DISTINCT l.target_id) FROM links l JOIN urls t ON t.id = l.target_id WHERE l.source_id = u.id AND l.type = 'a' AND t.kind = 'page') AS outlinks,
     (SELECT group_concat(h.lang, ', ') FROM hreflang h WHERE h.url_id = u.id) AS hreflang_codes,
+    (SELECT group_concat(ps.type, ', ') FROM page_schema ps WHERE ps.url_id = u.id) AS schema_types,
+    (SELECT COUNT(DISTINCT l.source_id) FROM links l WHERE l.target_id = u.id AND l.type = 'a') AS inlinks,
     (SELECT COUNT(*) FROM structured_data s WHERE s.url_id = u.id) AS schema_blocks
   FROM urls u LEFT JOIN responses r ON r.url_id = u.id LEFT JOIN page_elements p ON p.url_id = u.id
   WHERE u.kind = 'page'`;
@@ -64,7 +74,7 @@ const TRAFFIC_SOURCE = `SELECT u.id, u.url, u.indexable, u.indexability_reason, 
 
 const QUERY_SOURCE = `SELECT q.rowid AS id, q.url, q.query, q.clicks, q.impressions, q.ctr, q.position FROM gsc_queries q`;
 
-const INSPECTION_SOURCE = `SELECT i.rowid AS id, i.url, i.verdict, i.coverage_state, i.last_crawl_time, i.google_canonical, i.user_canonical, i.robots_state, i.page_fetch_state, i.error FROM url_inspection i`;
+const INSPECTION_SOURCE = `SELECT i.rowid AS id, i.url, i.verdict, i.coverage_state, i.last_crawl_time, i.google_canonical, i.user_canonical, i.robots_state, i.page_fetch_state, i.rich_verdict, i.rich_types, i.rich_issues, i.error FROM url_inspection i`;
 
 /** Rows imported for URLs the crawl never reached as a page. */
 const NOT_IN_CRAWL_SOURCE = `SELECT ROW_NUMBER() OVER (ORDER BY url) AS id, url, MAX(gsc_clicks) AS gsc_clicks, MAX(gsc_impressions) AS gsc_impressions, MAX(sessions) AS sessions, MAX(bing_clicks) AS bing_clicks FROM (
@@ -72,6 +82,21 @@ const NOT_IN_CRAWL_SOURCE = `SELECT ROW_NUMBER() OVER (ORDER BY url) AS id, url,
     UNION ALL SELECT url, NULL, NULL, sessions, NULL FROM analytics
     UNION ALL SELECT url, NULL, NULL, NULL, clicks FROM bing_webmaster
   ) WHERE url NOT IN (SELECT url FROM urls WHERE kind = 'page') GROUP BY url`;
+
+const SPEED_SOURCE = `SELECT s.rowid AS id, s.url, s.strategy, s.performance, s.lcp_ms, s.cls, s.inp_ms, s.ttfb_ms, s.field_lcp_ms, s.field_cls FROM pagespeed s`;
+
+const AI_BOT_SOURCE = `SELECT b.rowid AS id, b.name, b.owner, b.purpose, b.robots_allowed, b.probe_status, b.probe_refused FROM ai_bots b`;
+
+const AI_CITATION_SOURCE = `SELECT c.rowid AS id, c.url, c.engine, c.subject, c.volume, u.id IS NOT NULL AS in_crawl, u.indexable, r.status, u.link_score, p.word_count
+  FROM ai_citations c LEFT JOIN urls u ON u.url = c.url LEFT JOIN responses r ON r.url_id = u.id LEFT JOIN page_elements p ON p.url_id = u.id`;
+
+const AI_TRAFFIC_SOURCE = `SELECT r.rowid AS id, r.url, r.source, r.sessions, r.engaged_sessions, r.key_events FROM ai_referrals r`;
+
+const AI_SEARCH_PAGE_SOURCE = `SELECT a.rowid AS id, a.url, a.source, a.impressions, a.citations, a.in_crawl, u.indexable FROM ai_search_pages a LEFT JOIN urls u ON u.url = a.url`;
+
+const AI_SEARCH_QUERY_SOURCE = `SELECT q.rowid AS id, q.source, q.query, q.citations, q.citation_share FROM ai_search_queries q`;
+
+const GBP_SOURCE = `SELECT g.rowid AS id, g.title, g.business_status, g.category, g.address, g.phone, g.url, g.is_claimed, g.rating, g.rating_votes, g.total_photos, g.reviews_fetched, g.reviews_with_reply, g.reviews_last_90, g.latest_review, g.latest_post, g.fetched_at FROM gbp_profile g`;
 
 const column = (key: string, label: string, type: ElementColumnType = 'text'): ElementColumn => ({ key, label, type });
 const filter = (key: string, label: string, where: string): ElementFilter => ({ key, label, where });
@@ -130,8 +155,8 @@ const ELEMENTS: ElementDefinition[] = [
     label: 'Internal',
     source: PAGE_SOURCE,
     search: ['url', 'title'],
-    columns: [URL_COLUMN, STATUS_COLUMN, column('content_type', 'Type'), column('indexable', 'Indexable', 'yesno'), column('indexability_reason', 'Reason'), column('title', 'Title'), column('word_count', 'Words', 'number'), column('depth', 'Depth', 'number'), column('inlinks', 'Inlinks', 'number'), column('response_ms', 'Response ms', 'number'), column('bytes', 'Size', 'bytes')],
-    filters: [ALL, filter('html', 'HTML', 'is_html'), filter('non-html', 'Non-HTML', 'NOT is_html'), filter('indexable', 'Indexable', 'indexable = 1'), filter('non-indexable', 'Non-indexable', 'indexable = 0')],
+    columns: [URL_COLUMN, STATUS_COLUMN, column('content_type', 'Type'), column('indexable', 'Indexable', 'yesno'), column('indexability_reason', 'Reason'), column('title', 'Title'), column('word_count', 'Words', 'number'), column('depth', 'Depth', 'number'), column('inlinks', 'Inlinks', 'number'), column('outlinks', 'Outlinks', 'number'), column('link_score', 'Link score', 'number'), column('response_ms', 'Response ms', 'number'), column('bytes', 'Size', 'bytes')],
+    filters: [ALL, filter('html', 'HTML', 'is_html'), filter('non-html', 'Non-HTML', 'NOT is_html'), filter('indexable', 'Indexable', 'indexable = 1'), filter('non-indexable', 'Non-indexable', 'indexable = 0'), issueFilter('slow', 'Slow', 'page_slow'), issueFilter('uncompressed', 'Not compressed', 'no_compression'), issueFilter('soft-404', 'Possible soft 404', 'soft_404'), issueFilter('url-shape', 'URL problems', 'url_session_id', 'url_parameters', 'url_uppercase')],
   },
   {
     key: 'external',
@@ -147,7 +172,15 @@ const ELEMENTS: ElementDefinition[] = [
     source: PAGE_SOURCE,
     search: ['url', 'redirect_target'],
     columns: [URL_COLUMN, STATUS_COLUMN, column('redirect_target', 'Redirects to', 'url'), column('response_ms', 'Response ms', 'number'), column('inlinks', 'Inlinks', 'number'), column('error', 'Error')],
-    filters: [ALL, ...statusFilters, filter('robots', 'Blocked by robots.txt', `state = 'blocked_robots'`), issueFilter('chain', 'Redirect chain', 'redirect_chain'), issueFilter('loop', 'Redirect loop', 'redirect_loop')],
+    filters: [ALL, ...statusFilters, filter('robots', 'Blocked by robots.txt', `state = 'blocked_robots'`), issueFilter('chain', 'Redirect chain', 'redirect_chain'), issueFilter('loop', 'Redirect loop', 'redirect_loop'), issueFilter('temporary', 'Temporary redirect', 'redirect_temporary')],
+  },
+  {
+    key: 'head',
+    label: 'Head and images',
+    source: htmlPages(),
+    search: ['url', 'html_lang'],
+    columns: [URL_COLUMN, column('html_lang', 'Language'), column('viewport', 'Viewport', 'yesno'), column('og_title', 'og:title', 'yesno'), column('og_image', 'og:image', 'yesno'), column('twitter_card', 'Twitter card', 'yesno'), column('h3s', 'H3s', 'number'), column('images', 'Images', 'number'), column('images_no_alt', 'No alt', 'number'), column('images_no_dimensions', 'No size', 'number'), column('images_lazy', 'Lazy', 'number'), column('links_sponsored', 'Sponsored links', 'number'), column('links_ugc', 'UGC links', 'number')],
+    filters: [ALL, filter('no-lang', 'No language', 'has_signals AND html_lang IS NULL'), filter('no-viewport', 'No viewport', 'has_signals AND viewport = 0'), filter('no-og', 'No Open Graph', 'has_signals AND (og_title = 0 OR og_image = 0)'), filter('no-alt', 'Images with no alt', 'images_no_alt > 0'), filter('no-size', 'Images with no size', 'images_no_dimensions > 0')],
   },
   textElement('title', 'Page titles', 'title', 60, 30, { duplicate: 'title_duplicate', wide: 'title_too_wide' }),
   textElement('meta', 'Meta descriptions', 'meta', 155, 70, { duplicate: 'meta_duplicate', wide: 'meta_too_wide' }),
@@ -181,8 +214,8 @@ const ELEMENTS: ElementDefinition[] = [
     key: 'schema',
     label: 'Structured data',
     source: htmlPages(),
-    search: ['url'],
-    columns: [URL_COLUMN, column('schema_blocks', 'JSON-LD blocks', 'number'), column('indexable', 'Indexable', 'yesno')],
+    search: ['url', 'schema_types'],
+    columns: [URL_COLUMN, column('schema_blocks', 'JSON-LD blocks', 'number'), column('schema_types', 'Types'), column('indexable', 'Indexable', 'yesno')],
     filters: [ALL, filter('contains', 'Has JSON-LD', 'schema_blocks > 0'), filter('none', 'No JSON-LD', 'schema_blocks = 0'), issueFilter('invalid', 'Does not parse', 'schema_invalid_json'), issueFilter('property', 'Missing core property', 'schema_missing_property', 'schema_missing_type')],
   },
   {
@@ -191,7 +224,71 @@ const ELEMENTS: ElementDefinition[] = [
     source: htmlPages(),
     search: ['url', 'title'],
     columns: [URL_COLUMN, column('word_count', 'Words', 'number'), column('html_bytes', 'HTML size', 'bytes'), column('title', 'Title'), column('indexable', 'Indexable', 'yesno')],
-    filters: [ALL, filter('thin', 'Under 200 words', 'word_count < 200'), issueFilter('duplicate', 'Exact duplicates', 'duplicate_exact')],
+    filters: [ALL, filter('thin', 'Under 200 words', 'word_count < 200'), issueFilter('duplicate', 'Exact duplicates', 'duplicate_exact'), issueFilter('near-duplicate', 'Near-duplicates', 'near_duplicate')],
+  },
+  {
+    key: 'ai-readiness',
+    label: 'AI readiness',
+    source: htmlPages(),
+    search: ['url', 'schema_types', 'author'],
+    columns: [URL_COLUMN, column('indexable', 'Indexable', 'yesno'), column('schema_types', 'Schema types'), column('date_modified', 'Modified'), column('date_published', 'Published'), column('author', 'Author'), column('question_headings', 'Question headings', 'number'), column('first_paragraph_words', 'First paragraph words', 'number'), column('lists', 'Lists', 'number'), column('tables', 'Tables', 'number'), column('data_nosnippet', 'data-nosnippet', 'number'), column('raw_word_count', 'Words as served', 'number'), column('word_count', 'Words', 'number')],
+    filters: [ALL, filter('no-date', 'No date', 'has_signals AND date_modified IS NULL AND date_published IS NULL'), filter('no-author', 'No author', 'has_signals AND author IS NULL'), filter('no-schema', 'No schema', 'schema_blocks = 0'), filter('questions', 'Has question headings', 'question_headings > 0'), issueFilter('snippets', 'Snippets restricted', 'ai_snippet_restricted'), issueFilter('needs-js', 'Content needs JS', 'js_only_content', 'js_dependent', 'render_changes_seo')],
+  },
+  {
+    key: 'ai-bots',
+    label: 'AI bots',
+    source: AI_BOT_SOURCE,
+    search: ['name', 'owner'],
+    columns: [column('name', 'Bot'), column('owner', 'Owner'), column('purpose', 'Purpose'), column('robots_allowed', 'Allowed by robots.txt', 'yesno'), column('probe_status', 'Status when requested', 'status')],
+    filters: [ALL, filter('blocked', 'Blocked by robots.txt', 'robots_allowed = 0'), filter('refused', 'Refused by server', 'probe_refused = 1'), filter('search', 'Search and user bots', `purpose <> 'training'`), filter('training', 'Training bots', `purpose = 'training'`)],
+  },
+  {
+    key: 'ai-citations',
+    label: 'AI citations',
+    source: AI_CITATION_SOURCE,
+    search: ['url', 'subject', 'engine'],
+    columns: [URL_COLUMN, column('engine', 'Engine'), column('subject', 'Keyword'), column('volume', 'Search volume', 'number'), column('in_crawl', 'In crawl', 'yesno'), STATUS_COLUMN, column('indexable', 'Indexable', 'yesno'), column('link_score', 'Link score', 'number'), column('word_count', 'Words', 'number')],
+    filters: [ALL, filter('overview', 'AI Overviews', `engine = 'google_ai_overview'`), filter('ai-mode', 'AI Mode', `engine = 'google_ai_mode'`), filter('llm', 'LLM data', `engine = 'llm_mentions'`), filter('not-crawled', 'Not in crawl', 'NOT in_crawl'), filter('non-indexable', 'Not indexable', 'indexable = 0')],
+  },
+  {
+    key: 'ai-traffic',
+    label: 'AI referrals',
+    source: AI_TRAFFIC_SOURCE,
+    search: ['url', 'source'],
+    columns: [URL_COLUMN, column('source', 'Source'), column('sessions', 'Sessions', 'number'), column('engaged_sessions', 'Engaged', 'number'), column('key_events', 'Key events', 'number')],
+    filters: [ALL, filter('chatgpt', 'ChatGPT', `source LIKE '%chatgpt%' OR source LIKE '%openai%'`), filter('perplexity', 'Perplexity', `source LIKE '%perplexity%'`), filter('claude', 'Claude', `source LIKE '%claude%'`), filter('gemini', 'Gemini', `source LIKE '%gemini%'`), filter('converted', 'Has key events', 'key_events > 0')],
+  },
+  {
+    key: 'ai-search',
+    label: 'AI search pages',
+    source: AI_SEARCH_PAGE_SOURCE,
+    search: ['url'],
+    columns: [URL_COLUMN, column('source', 'Report'), column('impressions', 'Impressions', 'number'), column('citations', 'Citations', 'number'), column('in_crawl', 'In crawl', 'yesno'), column('indexable', 'Indexable', 'yesno')],
+    filters: [ALL, filter('gsc', 'Search Console', `source = 'gsc'`), filter('bing', 'Bing', `source = 'bing'`), filter('not-crawled', 'Not in crawl', 'in_crawl = 0')],
+  },
+  {
+    key: 'ai-queries',
+    label: 'AI grounding queries',
+    source: AI_SEARCH_QUERY_SOURCE,
+    search: ['query'],
+    columns: [column('query', 'Query'), column('source', 'Report'), column('citations', 'Citations', 'number'), column('citation_share', 'Citation share', 'number')],
+    filters: [ALL, filter('bing', 'Bing', `source = 'bing'`), filter('gsc', 'Search Console', `source = 'gsc'`)],
+  },
+  {
+    key: 'gbp',
+    label: 'Business Profile',
+    source: GBP_SOURCE,
+    search: ['title', 'category', 'address'],
+    columns: [column('title', 'Name'), column('business_status', 'Status'), column('category', 'Category'), column('address', 'Address'), column('phone', 'Phone'), column('url', 'Website', 'url'), column('is_claimed', 'Claimed', 'yesno'), column('rating', 'Rating', 'number'), column('rating_votes', 'Reviews', 'number'), column('total_photos', 'Photos', 'number'), column('reviews_with_reply', 'Replies in sample', 'number'), column('reviews_fetched', 'Reviews read', 'number'), column('reviews_last_90', 'Reviews in 90 days', 'number'), column('latest_post', 'Latest post')],
+    filters: [ALL, filter('unclaimed', 'Unclaimed', 'is_claimed = 0'), filter('closed', 'Closed', `business_status IN ('closed_forever', 'temporarily_closed')`)],
+  },
+  {
+    key: 'speed',
+    label: 'Page speed',
+    source: SPEED_SOURCE,
+    search: ['url'],
+    columns: [URL_COLUMN, column('strategy', 'Device'), column('performance', 'Score', 'number'), column('field_lcp_ms', 'LCP, real users', 'number'), column('lcp_ms', 'LCP, lab', 'number'), column('inp_ms', 'INP, real users', 'number'), column('field_cls', 'CLS, real users', 'number'), column('cls', 'CLS, lab', 'number'), column('ttfb_ms', 'Server response', 'number')],
+    filters: [ALL, issueFilter('poor', 'Poor vitals', 'cwv_lcp_poor', 'cwv_inp_poor', 'cwv_cls_poor'), issueFilter('improve', 'Needs improvement', 'cwv_needs_improvement'), filter('field', 'Has real-user data', 'field_lcp_ms IS NOT NULL OR inp_ms IS NOT NULL')],
   },
   {
     key: 'javascript',
@@ -222,8 +319,8 @@ const ELEMENTS: ElementDefinition[] = [
     label: 'Index status',
     source: INSPECTION_SOURCE,
     search: ['url', 'coverage_state', 'google_canonical'],
-    columns: [URL_COLUMN, column('verdict', 'Verdict'), column('coverage_state', 'Coverage'), column('last_crawl_time', 'Last Google crawl'), column('google_canonical', 'Google canonical', 'url'), column('user_canonical', 'Declared canonical', 'url'), column('error', 'Error')],
-    filters: [ALL, filter('indexed', 'Indexed', `verdict = 'PASS'`), filter('not-indexed', 'Not indexed', `verdict IN ('FAIL', 'NEUTRAL')`), issueFilter('not-indexed-here', 'Indexable here only', 'index_not_indexed'), issueFilter('canonical', 'Different canonical', 'index_canonical_mismatch'), filter('failed', 'Could not inspect', 'error IS NOT NULL')],
+    columns: [URL_COLUMN, column('verdict', 'Verdict'), column('coverage_state', 'Coverage'), column('last_crawl_time', 'Last Google crawl'), column('google_canonical', 'Google canonical', 'url'), column('user_canonical', 'Declared canonical', 'url'), column('rich_verdict', 'Rich results'), column('rich_types', 'Rich result types'), column('rich_issues', 'Rich result problems'), column('error', 'Error')],
+    filters: [ALL, filter('indexed', 'Indexed', `verdict = 'PASS'`), filter('not-indexed', 'Not indexed', `verdict IN ('FAIL', 'NEUTRAL')`), issueFilter('not-indexed-here', 'Indexable here only', 'index_not_indexed'), issueFilter('canonical', 'Different canonical', 'index_canonical_mismatch'), filter('rich', 'Has rich results', 'rich_types IS NOT NULL'), issueFilter('rich-invalid', 'Invalid rich results', 'rich_result_invalid'), filter('failed', 'Could not inspect', 'error IS NOT NULL')],
   },
   {
     key: 'not-in-crawl',

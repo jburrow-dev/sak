@@ -5,9 +5,13 @@ import { sakHome } from './db.ts';
 export interface Settings {
   /** When false, nothing may call a paid API. Cached results still work. */
   paidApis: boolean;
+  /** The most SAK may spend on DataForSEO in a calendar month (UTC). */
+  monthlyBudgetUsd: number;
+  /** The most one paid request or crawl plan may be estimated to cost. */
+  runBudgetUsd: number;
 }
 
-const DEFAULTS: Settings = { paidApis: true };
+const DEFAULTS: Settings = { paidApis: true, monthlyBudgetUsd: 50, runBudgetUsd: 5 };
 
 export function readSettings(): Settings {
   let raw: string;

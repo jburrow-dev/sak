@@ -84,6 +84,7 @@ server.registerTool('crawl_start', {
     render_js: z.boolean().optional().describe('Render pages in Chrome. Slower, and needed for sites built with JavaScript.'),
     crawl_subdomains: z.boolean().optional().describe('Treat subdomains of the start host as part of the site'),
     seeds: z.array(z.string()).optional().describe('Extra in-scope start URLs, for sections nothing links to'),
+    probe_ai_bots: z.boolean().optional().describe('Request the start URL once as each AI bot\'s user agent. Only when the user has confirmed they control the site or have permission.'),
     traffic: trafficField.optional().describe('Free Search Console, GA4 and Bing data to collect once the crawl finishes'),
   },
 }, async (args) => {
@@ -103,6 +104,7 @@ server.registerTool('crawl_start', {
   if (args.check_resources !== undefined) config.checkResources = args.check_resources;
   if (args.render_js !== undefined) config.renderJs = args.render_js;
   if (args.crawl_subdomains !== undefined) config.crawlSubdomains = args.crawl_subdomains;
+  if (args.probe_ai_bots) config.probeAiBots = true;
   if (args.seeds) {
     for (const seed of args.seeds) {
       const url = normalizeUrl(seed);

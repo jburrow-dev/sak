@@ -21,6 +21,8 @@ export interface FetchResult {
   /** Where the page ended up, when its JavaScript navigated away. */
   finalUrl?: string;
   renderError?: string;
+  /** The body was longer than SAK reads, so anything after the cut wasn't seen. */
+  truncated?: boolean;
 }
 
 export interface Fetcher {
@@ -53,6 +55,6 @@ export class HttpFetcher implements Fetcher {
     } else {
       await response.body?.cancel();
     }
-    return { status: response.status, headers: response.headers, body, bytes, elapsedMs: Math.round(performance.now() - started) };
+    return { status: response.status, headers: response.headers, body, bytes, elapsedMs: Math.round(performance.now() - started), truncated: body !== null && (bytes ?? 0) > MAX_BODY_BYTES };
   }
 }

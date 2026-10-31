@@ -1,7 +1,7 @@
 import { deleteMeta, getMeta, runAnalysis, setMeta, siteHost, type Db } from '@sak/core';
 import { importBing } from './bing.ts';
 import { INSPECTIONS_PER_DAY, resolveBingAccount, resolveGoogleAccount, updateConnections } from './connections.ts';
-import { DEFAULT_INSPECTIONS, importAnalytics, importSearchConsole, importTopQueries, inspectUrls } from './google.ts';
+import { DEFAULT_INSPECTIONS, importAiReferrals, importAnalytics, importSearchConsole, importTopQueries, inspectUrls } from './google.ts';
 import { recordPullFailure } from './pulls.ts';
 import type { SecretStore } from './secrets.ts';
 
@@ -81,7 +81,10 @@ export async function runTrafficPlan(db: Db, secrets: SecretStore, plan: Traffic
     if (gsc.topQueries) await step('gsc_queries', gsc.account, gsc.property, days, () => importTopQueries(db, secrets, gsc.property, days, fetchImpl, gsc.account));
     if (gsc.inspect) await step('url_inspection', gsc.account, gsc.property, null, () => inspectUrls(db, secrets, gsc.property, gsc.inspect!.limit, fetchImpl, gsc.account));
   }
-  if (ga4) await step('ga4', ga4.account, ga4.property, days, () => importAnalytics(db, secrets, ga4.property, days, fetchImpl, ga4.account));
+  if (ga4) {
+    await step('ga4', ga4.account, ga4.property, days, () => importAnalytics(db, secrets, ga4.property, days, fetchImpl, ga4.account));
+    await step('ai_referrals', ga4.account, ga4.property, days, () => importAiReferrals(db, secrets, ga4.property, days, fetchImpl, ga4.account));
+  }
   if (bing) await step('bing', bing.account, bing.site, days, () => importBing(db, secrets, bing.site, days, fetchImpl, bing.account));
   try {
     rememberChoices(db, plan);

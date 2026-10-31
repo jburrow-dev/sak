@@ -239,6 +239,56 @@ export async function importAnalytics(db: Db, secrets: SecretStore, property: st
   return { rows: rows.length, matched: grouped.matched, unmatched: grouped.unmatched, dropped: grouped.dropped };
 }
 
+/** Hostnames AI products send visitors from. Anything arriving with no referrer can't be counted, so this is a minimum. */
+const AI_REFERRERS = '(www\\.)?(chatgpt\\.com|chat\\.openai\\.com|perplexity\\.ai|claude\\.ai|gemini\\.google\\.com|copilot\\.microsoft\\.com|you\\.com|meta\\.ai|grok\\.com|deepseek\\.com)';
+
+export async function importAiReferrals(db: Db, secrets: SecretStore, property: string, days: number, fetchImpl: typeof fetch = fetch, account?: string): Promise<ImportResult> {
+  const chosen = await resolveGoogleAccount(secrets, account);
+  const token = await accessToken(secrets, chosen, fetchImpl);
+  const endpoint = `https://analyticsdata.googleapis.com/v1beta/properties/${encodeURIComponent(property)}:runReport`;
+  const window = dateWindow(days);
+  const rows: any[] = [];
+  const limit = 25_000;
+  for (let offset = 0; ; offset += limit) {
+    const data = await googlePost(endpoint, token, {
+      dateRanges: [window],
+      dimensions: [{ name: 'hostName' }, { name: 'pagePath' }, { name: 'sessionSource' }],
+      metrics: [{ name: 'sessions' }, { name: 'engagedSessions' }, { name: 'keyEvents' }],
+      dimensionFilter: { filter: { fieldName: 'sessionSource', stringFilter: { matchType: 'FULL_REGEXP', value: AI_REFERRERS, caseSensitive: false } } },
+      limit,
+      offset,
+    }, GA4_LABEL, fetchImpl);
+    rows.push(...(data.rows ?? []));
+    if (rows.length >= (data.rowCount ?? 0) || (data.rows?.length ?? 0) === 0) break;
+  }
+  const resolve = crawlResolver(db);
+  const totals = new Map<string, { url: string; source: string; values: number[] }>();
+  let matched = 0;
+  let dropped = 0;
+  for (const row of rows) {
+    const raw = gaUrl(row.dimensionValues[0].value, row.dimensionValues[1].value);
+    const resolved = raw ? resolve(raw) : null;
+    if (!resolved) {
+      dropped += 1;
+      continue;
+    }
+    if (resolved.matched) matched += 1;
+    const source = String(row.dimensionValues[2].value).toLowerCase().replace(/^www\./, '');
+    const key = `${resolved.url} ${source}`;
+    const values = row.metricValues.map((metric: any) => Number(metric.value)) as number[];
+    const seen = totals.get(key);
+    if (seen) values.forEach((value, i) => { seen.values[i] += value; });
+    else totals.set(key, { url: resolved.url, source, values });
+  }
+  db.transaction(() => {
+    db.exec('DELETE FROM ai_referrals');
+    const insert = db.prepare('INSERT INTO ai_referrals (url, source, sessions, engaged_sessions, key_events) VALUES (?, ?, ?, ?, ?)');
+    for (const { url, source, values } of totals.values()) insert.run(url, source, values[0], values[1], values[2]);
+    recordPull(db, { source: 'ai_referrals', account: chosen, property, days, ...toPullDates(window), rows: rows.length, matched, dropped, note: 'Only visits with an AI product as their referrer. Others arrive with none, so this is a minimum.' });
+  })();
+  return { rows: rows.length, matched, unmatched: rows.length - matched - dropped, dropped };
+}
+
 export const MAX_QUERY_ROWS = 200_000;
 export const QUERIES_PER_PAGE = 10;
 
@@ -307,8 +357,8 @@ export async function inspectUrls(db: Db, secrets: SecretStore, property: string
     WHERE u.kind = 'page' AND r.status = 200 AND u.url NOT IN (SELECT url FROM url_inspection WHERE error IS NULL)
     ORDER BY u.indexable = 1 DESC, COALESCE(sc.clicks, 0) DESC, u.depth ASC NULLS LAST, u.id`).all() as { url: string }[];
   const allowed = Math.min(limit, inspectionsLeftToday(property));
-  const save = db.prepare(`INSERT OR REPLACE INTO url_inspection (url, verdict, coverage_state, indexing_state, robots_state, page_fetch_state, last_crawl_time, google_canonical, user_canonical, error, fetched_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const save = db.prepare(`INSERT OR REPLACE INTO url_inspection (url, verdict, coverage_state, indexing_state, robots_state, page_fetch_state, last_crawl_time, google_canonical, user_canonical, error, fetched_at, rich_verdict, rich_types, rich_issues)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   let inspected = 0;
   let failed = 0;
   let unsaved = 0;
@@ -322,7 +372,11 @@ export async function inspectUrls(db: Db, secrets: SecretStore, property: string
       try {
         const data = await googlePost('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', token, { inspectionUrl: url, siteUrl: property }, 'URL Inspection', fetchImpl);
         const result = data.inspectionResult?.indexStatusResult ?? {};
-        save.run(url, result.verdict ?? null, result.coverageState ?? null, result.indexingState ?? null, result.robotsTxtState ?? null, result.pageFetchState ?? null, result.lastCrawlTime ?? null, result.googleCanonical ?? null, result.userCanonical ?? null, null, at);
+        const rich = data.inspectionResult?.richResultsResult;
+        const detected: any[] = rich?.detectedItems ?? [];
+        const richIssues = detected.flatMap((item) => (item.items ?? []).flatMap((entry: any) => (entry.issues ?? []).map((issue: any) => `${item.richResultType}: ${issue.issueMessage}`)));
+        save.run(url, result.verdict ?? null, result.coverageState ?? null, result.indexingState ?? null, result.robotsTxtState ?? null, result.pageFetchState ?? null, result.lastCrawlTime ?? null, result.googleCanonical ?? null, result.userCanonical ?? null, null, at,
+          rich?.verdict ?? null, detected.length ? detected.map((item) => item.richResultType).join(', ') : null, richIssues.length ? [...new Set(richIssues)].join(' | ') : null);
         inspected += 1;
       } catch (error) {
         // These apply to the whole property, so every other URL would fail the same way.
@@ -330,7 +384,7 @@ export async function inspectUrls(db: Db, secrets: SecretStore, property: string
           stoppedBy = error.message;
           break;
         }
-        save.run(url, null, null, null, null, null, null, null, null, (error as Error).message, at);
+        save.run(url, null, null, null, null, null, null, null, null, (error as Error).message, at, null, null, null);
         failed += 1;
       }
       unsaved += 1;

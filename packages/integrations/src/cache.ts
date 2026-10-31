@@ -28,19 +28,28 @@ export class ApiCache {
     return createHash('sha256').update(`${endpoint}\n${JSON.stringify(body)}`).digest('hex');
   }
 
-  get<T>(endpoint: string, body: unknown): CachedResponse<T> | null {
+  /** With maxAgeDays, an older answer counts as a miss. AI answers change, so they don't stay valid forever. */
+  get<T>(endpoint: string, body: unknown, maxAgeDays?: number): CachedResponse<T> | null {
     const row = this.db.prepare('SELECT response, cost, fetched_at FROM api_cache WHERE key = ?').get(this.key(endpoint, body)) as { response: string; cost: number; fetched_at: string } | undefined;
-    return row ? { value: JSON.parse(row.response) as T, cost: 0, cached: true, fetchedAt: row.fetched_at } : null;
+    if (!row) return null;
+    if (maxAgeDays !== undefined && Date.now() - new Date(row.fetched_at).getTime() > maxAgeDays * 86_400_000) return null;
+    return { value: JSON.parse(row.response) as T, cost: 0, cached: true, fetchedAt: row.fetched_at };
   }
 
-  put(endpoint: string, body: unknown, response: unknown, cost: number): string {
+  /** The ledger records each charge once, so a task's collected result can be saved without adding another row. */
+  put(endpoint: string, body: unknown, response: unknown, cost: number, options: { ledger?: boolean } = {}): string {
     const at = new Date().toISOString();
     this.db.transaction(() => {
       this.db.prepare('INSERT OR REPLACE INTO api_cache (key, endpoint, request, response, cost, fetched_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(this.key(endpoint, body), endpoint, JSON.stringify(body), JSON.stringify(response), cost, at);
-      this.db.prepare('INSERT INTO ledger (endpoint, cost, at) VALUES (?, ?, ?)').run(endpoint, cost, at);
+      if (options.ledger !== false) this.db.prepare('INSERT INTO ledger (endpoint, cost, at) VALUES (?, ?, ?)').run(endpoint, cost, at);
     })();
     return at;
+  }
+
+  spentSince(iso: string): number {
+    const row = this.db.prepare('SELECT COALESCE(SUM(cost), 0) AS total FROM ledger WHERE at >= ?').get(iso) as { total: number };
+    return row.total;
   }
 
   spend(): { total: number; calls: number; byEndpoint: { endpoint: string; cost: number; calls: number }[] } {

@@ -379,16 +379,24 @@ function CompareView({ crawl, crawls }: { crawl: string; crawls: Crawl[] }) {
 
 function PaidValue({ kind, value }: { kind: string; value: any }) {
   if (kind === 'backlinks') return <span>{value.backlinks ?? 'No'} backlinks from {value.referring_domains ?? 0} domains, rank {value.rank ?? 'none'}{value.spam_score !== null ? `, spam score ${value.spam_score}` : ''}</span>;
+  if (kind === 'ai_overview') return <span>Cited in AI Overviews for {value.total ?? value.keywords?.length ?? 0} keywords. See AI citations in the Elements tab.</span>;
+  if (kind === 'llm_pages') return <span>{(value as any[]).filter((row) => row.own).length} of your pages among {(value as any[]).length} cited pages.</span>;
+  if (kind === 'llm_citations') {
+    return <ul className="plain-list">{(value as any[]).map((row) => <li key={row.target}>{row.target}: {row.mentions ?? 'no'} citations</li>)}</ul>;
+  }
+  if (kind === 'ai_mode') {
+    return <ul className="plain-list">{(value as any[]).map((row) => <li key={row.keyword}>{row.keyword}: {row.cited ? 'cited' : row.answer ? 'answered, not cited' : 'no AI answer'}</li>)}</ul>;
+  }
   return (
     <ul className="plain-list">{(value as any[]).map((row) => (
-      <li key={row.keyword}>{row.keyword}: {kind === 'rank' ? (row.position ? `position ${row.position}` : 'not in the top 10') : `${row.search_volume ?? 'no'} searches a month`}</li>
+      <li key={row.keyword}>{row.keyword}: {kind === 'rank' ? `${row.position ? `position ${row.position}` : 'not in the top 10'}${row.ai_cited ? ', cited in the AI Overview' : row.ai_overview ? ', AI Overview without you' : ''}` : `${row.search_volume ?? 'no'} searches a month`}</li>
     ))}</ul>
   );
 }
 
 function PaidData({ crawl, refresh }: { crawl: string; refresh: number }) {
   const { data } = useApi<{ kind: string; key: string; value: any; cost: number; cached: number; error: string | null }[]>(`/api/crawls/${crawl}/paid`, refresh);
-  const labels: Record<string, string> = { backlinks: 'Backlinks', volume: 'Search volume', rank: 'Google rank' };
+  const labels: Record<string, string> = { backlinks: 'Backlinks', volume: 'Search volume', rank: 'Google rank', ai_overview: 'AI Overview keywords', ai_mode: 'AI Mode', llm_citations: 'AI citations', llm_pages: 'AI-cited pages', budget: 'Spending limit' };
   return (
     <>
       <h3>Paid data for this crawl</h3>

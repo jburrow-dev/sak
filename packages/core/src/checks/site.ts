@@ -6,12 +6,14 @@ export interface SitePage {
   meta: string | null;
   textHash: string | null;
   canonical: string | null;
+  simhash?: string | null;
 }
 
 export interface SiteLink {
   source: string;
   target: string;
   type: string;
+  anchor?: string | null;
 }
 
 export interface SiteInput {
@@ -75,9 +77,113 @@ export function checkStatuses(urls: UrlRow[]): IssueFinding[] {
       if (row.status >= 500) out.push({ type: 'status_5xx', url: row.url, detail: String(row.status) });
       else if (row.status >= 400) out.push({ type: 'status_4xx', url: row.url, detail: String(row.status) });
       else if (row.status >= 300) out.push({ type: 'status_3xx', url: row.url, detail: `${row.status} to ${row.redirect_target ?? '(no target)'}` });
+      if (row.status === 302 || row.status === 303 || row.status === 307) out.push({ type: 'redirect_temporary', url: row.url, detail: `${row.status} to ${row.redirect_target ?? '(no target)'}` });
     }
   }
   return out;
+}
+
+const SLOW_RESPONSE_MS = 1000;
+const HEAVY_PAGE_BYTES = 1024 * 1024;
+const HEAVY_ASSET_BYTES = 512_000;
+const COMPRESSIBLE_BYTES = 1024;
+
+/** Reads response headers, which are NULL on crawls saved before SAK kept them. */
+export function checkDelivery(urls: UrlRow[]): IssueFinding[] {
+  const out: IssueFinding[] = [];
+  for (const row of urls) {
+    if (row.status !== 200) continue;
+    if (row.truncated) out.push({ type: 'html_truncated', url: row.url, detail: `${row.bytes} bytes` });
+    if (row.kind === 'page') {
+      if (row.response_ms !== null && row.response_ms > SLOW_RESPONSE_MS) out.push({ type: 'page_slow', url: row.url, detail: `${row.response_ms} ms` });
+      if (row.bytes !== null && row.bytes > HEAVY_PAGE_BYTES) out.push({ type: 'page_heavy', url: row.url, detail: `${row.bytes} bytes` });
+    }
+    const asset = row.kind === 'image' || row.kind === 'css' || row.kind === 'script';
+    if (asset && row.bytes !== null && row.bytes > HEAVY_ASSET_BYTES) out.push({ type: 'asset_heavy', url: row.url, detail: `${row.bytes} bytes` });
+    const text = row.kind === 'css' || row.kind === 'script' || (row.kind === 'page' && /html/i.test(row.content_type ?? ''));
+    if (text && row.content_encoding === '' && (row.bytes ?? 0) >= COMPRESSIBLE_BYTES) out.push({ type: 'no_compression', url: row.url, detail: `${row.bytes} bytes` });
+    if (asset && row.cache_control !== null && row.cache_control !== undefined && (row.cache_control === '' || /no-store/i.test(row.cache_control))) out.push({ type: 'asset_no_cache', url: row.url, detail: row.cache_control || 'No Cache-Control header' });
+  }
+  return out;
+}
+
+export function checkMixedContent(input: SiteInput): IssueFinding[] {
+  const out: IssueFinding[] = [];
+  for (const link of input.links) {
+    if ((link.type === 'img' || link.type === 'css' || link.type === 'script') && link.source.startsWith('https:') && link.target.startsWith('http:')) {
+      out.push({ type: 'mixed_content', url: link.source, detail: link.target });
+    }
+  }
+  return out;
+}
+
+const SESSION_PARAM = /^(sid|sessionid|session_id|phpsessid|jsessionid|aspsessionid)$/i;
+
+export function checkUrlShape(urls: UrlRow[]): IssueFinding[] {
+  const out: IssueFinding[] = [];
+  for (const row of urls) {
+    if (row.kind !== 'page' || row.status !== 200) continue;
+    const parsed = new URL(row.url);
+    const params = [...parsed.searchParams.keys()];
+    if (params.some((name) => SESSION_PARAM.test(name))) out.push({ type: 'url_session_id', url: row.url });
+    if (row.indexable === 1 && params.length > 0) out.push({ type: 'url_parameters', url: row.url, detail: params.join(', ') });
+    if (/[A-Z]/.test(parsed.pathname)) out.push({ type: 'url_uppercase', url: row.url });
+  }
+  return out;
+}
+
+const hamming = (a: string, b: string) => {
+  let distance = 0;
+  for (let xor = BigInt(`0x${a}`) ^ BigInt(`0x${b}`); xor; xor &= xor - 1n) distance += 1;
+  return distance;
+};
+
+const NEAR_DUPLICATE_BITS = 3;
+const MAX_BAND_SIZE = 500;
+
+/**
+ * Two fingerprints within 3 bits must agree on at least one of four 16-bit bands, so only pages
+ * sharing a band are compared. A huge band is template text, which would make this quadratic.
+ */
+export function checkNearDuplicates(pages: SitePage[], urls: UrlRow[]): IssueFinding[] {
+  const indexable = new Set(urls.filter((u) => u.indexable === 1).map((u) => u.url));
+  const candidates = pages.filter((p) => p.simhash && indexable.has(p.url));
+  const bands = new Map<string, SitePage[]>();
+  for (const page of candidates) {
+    for (let band = 0; band < 4; band++) {
+      const key = `${band}:${page.simhash!.slice(band * 4, band * 4 + 4)}`;
+      if (!bands.has(key)) bands.set(key, []);
+      bands.get(key)!.push(page);
+    }
+  }
+  const closest = new Map<string, string>();
+  for (const group of bands.values()) {
+    if (group.length < 2 || group.length > MAX_BAND_SIZE) continue;
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const [a, b] = [group[i], group[j]];
+        // Exact matches have their own issue.
+        if (a.textHash === b.textHash || hamming(a.simhash!, b.simhash!) > NEAR_DUPLICATE_BITS) continue;
+        if (!closest.has(a.url)) closest.set(a.url, b.url);
+        if (!closest.has(b.url)) closest.set(b.url, a.url);
+      }
+    }
+  }
+  return [...closest].map(([url, other]) => ({ type: 'near_duplicate', url, detail: `Very similar to ${other}` }));
+}
+
+const GENERIC_ANCHOR = /^(click here|here|read more|learn more|more|this page|link|details)$/i;
+
+export function checkAnchors(input: SiteInput): IssueFinding[] {
+  const internal = new Set(input.urls.filter((u) => u.kind === 'page').map((u) => u.url));
+  const counts = new Map<string, Map<string, number>>();
+  for (const link of input.links) {
+    if (link.type !== 'a' || !link.anchor || !internal.has(link.target) || !GENERIC_ANCHOR.test(link.anchor.trim())) continue;
+    if (!counts.has(link.source)) counts.set(link.source, new Map());
+    const anchors = counts.get(link.source)!;
+    anchors.set(link.anchor.trim(), (anchors.get(link.anchor.trim()) ?? 0) + 1);
+  }
+  return [...counts].map(([url, anchors]) => ({ type: 'link_generic_anchor', url, detail: [...anchors].map(([anchor, n]) => `"${anchor}" x${n}`).join(', ') }));
 }
 
 export function checkRedirectChains(chains: RedirectChain[]): IssueFinding[] {
@@ -214,5 +320,36 @@ export function runSiteChecks(input: SiteInput, chains: RedirectChain[]): IssueF
     ...checkCanonicalTargets(input),
     ...checkHreflangTargets(input),
     ...checkLinkGraph(input),
+    ...checkDelivery(input.urls),
+    ...checkMixedContent(input),
+    ...checkUrlShape(input.urls),
+    ...checkNearDuplicates(input.pages, input.urls),
+    ...checkAnchors(input),
   ];
+}
+
+const PAGERANK_DAMPING = 0.85;
+const PAGERANK_ROUNDS = 20;
+
+/** Internal PageRank over followed links between live pages, scaled so the strongest page is 100. */
+export function linkScores(pages: string[], links: { source: string; target: string }[]): Map<string, number> {
+  const index = new Map(pages.map((url, i) => [url, i]));
+  const outgoing = pages.map(() => new Set<number>());
+  for (const { source, target } of links) {
+    const [from, to] = [index.get(source), index.get(target)];
+    if (from !== undefined && to !== undefined && from !== to) outgoing[from].add(to);
+  }
+  const n = pages.length;
+  let scores = new Array<number>(n).fill(1 / Math.max(n, 1));
+  for (let round = 0; round < PAGERANK_ROUNDS; round++) {
+    const next = new Array<number>(n).fill((1 - PAGERANK_DAMPING) / n);
+    let dangling = 0;
+    outgoing.forEach((targets, from) => {
+      if (targets.size === 0) dangling += scores[from];
+      else for (const to of targets) next[to] += (PAGERANK_DAMPING * scores[from]) / targets.size;
+    });
+    scores = next.map((score) => score + (PAGERANK_DAMPING * dangling) / n);
+  }
+  const max = Math.max(...scores, 0);
+  return new Map(pages.map((url, i) => [url, max > 0 ? Math.round((scores[i] / max) * 1000) / 10 : 0]));
 }

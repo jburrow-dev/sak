@@ -8,6 +8,7 @@ import { ChromeRenderer, RenderingFetcher } from './render.ts';
 import { RobotsCache } from './robots.ts';
 import { collectSitemapUrls } from './sitemap.ts';
 import { runAnalysis } from './analysis.ts';
+import { collectSiteAudit, saveSiteAudit, type SiteAudit } from './site-audit.ts';
 
 export interface CrawlProgress {
   id: string;
@@ -58,6 +59,19 @@ function detectBlock(result: FetchResult): string | null {
   return null;
 }
 
+/** SEO elements JavaScript changed, which a crawler that doesn't run it would read differently. */
+function changedByRendering(raw: PageFacts, rendered: PageFacts): string[] {
+  const compare: [string, unknown, unknown][] = [
+    ['title', raw.titles[0], rendered.titles[0]],
+    ['meta description', raw.metaDescriptions[0], rendered.metaDescriptions[0]],
+    ['H1', raw.h1s[0], rendered.h1s[0]],
+    ['canonical', raw.canonicals[0], rendered.canonicals[0]],
+    ['robots', raw.metaRobots.join(','), rendered.metaRobots.join(',')],
+    ['JSON-LD', raw.jsonLd.length, rendered.jsonLd.length],
+  ];
+  return compare.filter(([, before, after]) => before !== after).map(([name]) => name);
+}
+
 class Crawl {
   private id: string;
   private db: Db;
@@ -87,12 +101,12 @@ class Crawl {
       setState: db.prepare('UPDATE urls SET state = ? WHERE id = ?'),
       countAll: db.prepare(`SELECT COUNT(*) AS n FROM urls WHERE kind = 'page'`),
       countPending: db.prepare(`SELECT COUNT(*) AS n FROM urls WHERE state IN ('pending', 'in_progress')`),
-      insertResponse: db.prepare(`INSERT OR REPLACE INTO responses (url_id, status, content_type, redirect_target, x_robots, link_canonical, response_ms, bytes, error, blocked_reason, fetched_at)
-        VALUES (@urlId, @status, @contentType, @redirectTarget, @xRobots, @linkCanonical, @responseMs, @bytes, @error, @blockedReason, @fetchedAt)`),
+      insertResponse: db.prepare(`INSERT OR REPLACE INTO responses (url_id, status, content_type, redirect_target, x_robots, link_canonical, response_ms, bytes, error, blocked_reason, fetched_at, content_encoding, cache_control, hsts, truncated)
+        VALUES (@urlId, @status, @contentType, @redirectTarget, @xRobots, @linkCanonical, @responseMs, @bytes, @error, @blockedReason, @fetchedAt, @contentEncoding, @cacheControl, @hsts, @truncated)`),
       insertLink: db.prepare('INSERT INTO links (source_id, target_id, type, anchor, nofollow) VALUES (?, ?, ?, ?, ?)'),
       deleteLinks: db.prepare('DELETE FROM links WHERE source_id = ?'),
-      insertPage: db.prepare(`INSERT OR REPLACE INTO page_elements (url_id, titles, meta_descriptions, h1s, h2s, meta_robots, canonicals, word_count, text_hash, html_bytes, script_count, has_empty_app_root, rendered, raw_word_count, js_only_links, render_error)
-        VALUES (@urlId, @titles, @metaDescriptions, @h1s, @h2s, @metaRobots, @canonicals, @wordCount, @textHash, @htmlBytes, @scriptCount, @hasEmptyAppRoot, @rendered, @rawWordCount, @jsOnlyLinks, @renderError)`),
+      insertPage: db.prepare(`INSERT OR REPLACE INTO page_elements (url_id, titles, meta_descriptions, h1s, h2s, meta_robots, canonicals, word_count, text_hash, html_bytes, script_count, has_empty_app_root, rendered, raw_word_count, js_only_links, render_error, signals)
+        VALUES (@urlId, @titles, @metaDescriptions, @h1s, @h2s, @metaRobots, @canonicals, @wordCount, @textHash, @htmlBytes, @scriptCount, @hasEmptyAppRoot, @rendered, @rawWordCount, @jsOnlyLinks, @renderError, @signals)`),
       deleteHreflang: db.prepare('DELETE FROM hreflang WHERE url_id = ?'),
       insertHreflang: db.prepare('INSERT INTO hreflang (url_id, lang, href) VALUES (?, ?, ?)'),
       deleteJsonLd: db.prepare('DELETE FROM structured_data WHERE url_id = ?'),
@@ -134,15 +148,25 @@ class Crawl {
   private async seed(): Promise<void> {
     const starts = [this.config.startUrl, ...this.config.seeds];
     for (const start of starts) this.enqueue(start, 0);
-    if (!this.config.useSitemaps) return;
-    const sitemaps: string[] = [];
-    for (const origin of new Set(starts.map((start) => new URL(start).origin))) {
-      const robots = await this.robots.forUrl(origin);
-      sitemaps.push(...(robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`]));
+    let audited: SiteAudit['sitemaps'] = null;
+    let urls: string[] = [];
+    if (this.config.useSitemaps) {
+      const sitemaps: string[] = [];
+      const declared: string[] = [];
+      for (const origin of new Set(starts.map((start) => new URL(start).origin))) {
+        const robots = await this.robots.forUrl(origin);
+        declared.push(...robots.sitemaps);
+        sitemaps.push(...(robots.sitemaps.length ? robots.sitemaps : [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`]));
+      }
+      const headers = { ...this.config.headers, 'user-agent': this.config.userAgent };
+      const collected = await collectSitemapUrls(sitemaps, headers, this.config.timeoutMs);
+      urls = collected.urls;
+      audited = { declared, reports: collected.reports };
+      setMeta(this.db, 'sitemap_files', JSON.stringify(collected.files));
     }
-    const headers = { ...this.config.headers, 'user-agent': this.config.userAgent };
-    const { urls, files } = await collectSitemapUrls(sitemaps, headers, this.config.timeoutMs);
-    setMeta(this.db, 'sitemap_files', JSON.stringify(files));
+    // A resumed crawl keeps the audit it already has, rather than probing the site again.
+    if (!getMeta(this.db, 'site_audit')) saveSiteAudit(this.db, await collectSiteAudit(this.config, audited));
+    if (!this.config.useSitemaps) return;
     const mark = this.db.prepare('UPDATE urls SET in_sitemap = 1 WHERE id = ?');
     this.db.transaction(() => {
       for (const url of urls) {
@@ -162,6 +186,7 @@ class Crawl {
     const facts: PageFacts | null = result.body !== null && result.status < 300 ? parseHtml(result.body, result.finalUrl ?? url) : null;
     const raw = facts && result.rawBody !== undefined ? parseHtml(result.rawBody, url) : null;
     const rawLinks = new Set(raw?.links.map((link) => link.url));
+    const renderChanges = facts && raw ? changedByRendering(raw, facts) : [];
 
     this.db.transaction(() => {
       this.statements.insertResponse.run({
@@ -176,6 +201,10 @@ class Crawl {
         error: null,
         blockedReason: detectBlock(result),
         fetchedAt: new Date().toISOString(),
+        contentEncoding: result.headers.get('content-encoding') ?? '',
+        cacheControl: result.headers.get('cache-control') ?? '',
+        hsts: result.headers.get('strict-transport-security') ?? '',
+        truncated: result.truncated ? 1 : 0,
       });
       if (redirectTarget && kind === 'page') {
         // Each hop adds one to depth, matching Screaming Frog.
@@ -201,6 +230,7 @@ class Crawl {
         rawWordCount: raw?.wordCount ?? null,
         jsOnlyLinks: raw ? new Set(facts.links.filter((link) => link.type === 'a' && !rawLinks.has(link.url)).map((link) => link.url)).size : null,
         renderError: result.renderError ?? null,
+        signals: JSON.stringify(renderChanges.length ? { ...facts.signals, renderChanges } : facts.signals),
       });
       const nextDepth = depth === null ? null : depth + 1;
       const followLinks = !this.hasNofollow(facts, result.headers.get('x-robots-tag'));
@@ -239,6 +269,7 @@ class Crawl {
     this.statements.insertResponse.run({
       urlId, status: null, contentType: null, redirectTarget: null, xRobots: null, linkCanonical: null,
       responseMs: null, bytes: null, error: message, blockedReason: null, fetchedAt: new Date().toISOString(),
+      contentEncoding: null, cacheControl: null, hsts: null, truncated: 0,
     });
   }
 

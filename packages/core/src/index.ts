@@ -11,5 +11,6 @@ export * from './query.ts';
 export * from './export.ts';
 export * from './compare.ts';
 export * from './sitemap.ts';
+export * from './site-audit.ts';
 export { ISSUES } from './checks/catalog.ts';
 export { Database, crawlPath, createCrawlDb, listCrawlIds, openCrawlDb, sakHome, deleteMeta, getMeta, setMeta, type Db } from './db.ts';

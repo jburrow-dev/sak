@@ -6,7 +6,7 @@ import {
   type CrawlConfig, type CrawlProgress, type ExportKind,
 } from '@sak/core';
 import { PaidApisDisabled, emptyPlan, estimatePlan, savePaidPlan, saveTrafficPlan, type PaidPlan } from '@sak/integrations';
-import { printPaidData, runIntegrationCommand, runPaidPlan, runTraffic, trafficPlanFromFlags } from './integrations.ts';
+import { checkPlanBudget, printPaidData, runIntegrationCommand, runPaidPlan, runTraffic, trafficPlanFromFlags } from './integrations.ts';
 
 const USAGE = `sak: local SEO crawler
 
@@ -14,8 +14,8 @@ Crawling
   sak crawl <url> [--max-urls N] [--max-depth N] [--rate N] [--concurrency N]
                   [--include REGEX]... [--exclude REGEX]... [--user-agent UA] [--header "K: V"]...
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
-                  [--no-resources] [--render] [--subdomains] [--seed URL]...
-                  [--backlinks] [--keywords "a,b" --volume --rank] [--yes]
+                  [--no-resources] [--render] [--subdomains] [--seed URL]... [--probe-ai-bots]
+                  [--backlinks] [--keywords "a,b" --volume --rank --ai-mode] [--ai-overview] [--llm] [--competitor DOMAIN]... [--yes]
                   [--gsc PROPERTY] [--ga4 ID] [--bing SITE] [--days 30|60|90] [--account EMAIL] [--bing-key NAME]
                   [--top-queries] [--inspect N]
   sak resume <id>
@@ -26,6 +26,7 @@ Results
   sak url <id> <url>
   sak export <id> --kind urls|issues|links --out PATH
   sak compare <before-id> <after-id>
+  sak audit <id>
   sak ui [--port N]
 
 Integrations
@@ -42,10 +43,18 @@ Integrations
   sak gsc <id> --property sc-domain:example.com [--days 90] [--account EMAIL]
   sak ga4 <id> --property 123456789 [--days 90] [--account EMAIL]
   sak psi <id> [--strategy mobile|desktop] [--limit 10] [--url URL]...
+  sak crux <id>
+  sak ai-import <id> --source gsc|bing --file PATH
   sak kw <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
   sak backlinks <domain> [--refresh] [--yes]
   sak rank <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
+  sak ai-overview <domain> [--limit 100] [--location 2840] [--language en] [--refresh] [--yes]
+  sak ai-mode <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
+  sak llm <domain> [--competitor DOMAIN]... [--location 2840] [--language en] [--refresh] [--yes]
+  sak llm-prompt <domain> --engine chat_gpt|claude|gemini|perplexity --model NAME --prompt TEXT [--brand NAME] [--samples 3] [--refresh] [--yes]
+  sak gbp <id> <name|cid:ID|place_id:ID> [--reviews 50] [--no-posts] [--location 2840] [--language en] [--refresh] [--yes]
   sak cost
+  sak budget [--run USD] [--monthly USD]
   sak paid [on|off]
 
 A crawl can be stopped with Ctrl-C and continued later with sak resume.
@@ -95,6 +104,9 @@ async function main() {
       property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
       gsc: { type: 'string' }, ga4: { type: 'string' }, bing: { type: 'string' }, account: { type: 'string' }, 'bing-key': { type: 'string' }, 'top-queries': { type: 'boolean' }, inspect: { type: 'string' }, label: { type: 'string' },
+      'probe-ai-bots': { type: 'boolean' }, 'ai-overview': { type: 'boolean' }, 'ai-mode': { type: 'boolean' }, llm: { type: 'boolean' }, competitor: { type: 'string', multiple: true },
+      source: { type: 'string' }, file: { type: 'string' }, engine: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' }, brand: { type: 'string' }, samples: { type: 'string' },
+      reviews: { type: 'string' }, 'no-posts': { type: 'boolean' }, monthly: { type: 'string' }, run: { type: 'string' },
     },
   });
 
@@ -129,6 +141,7 @@ async function main() {
       if (values.render) config.renderJs = true;
       if (values.subdomains) config.crawlSubdomains = true;
       if (values.seed) config.seeds = values.seed;
+      if (values['probe-ai-bots']) config.probeAiBots = true;
       const resolved = resolveCrawlConfig(config);
       const plan: PaidPlan = {
         backlinks: Boolean(values.backlinks),
@@ -137,11 +150,16 @@ async function main() {
         keywords: (values.keywords ?? '').split(',').map((k) => k.trim()).filter(Boolean),
         location: values.location ? Number(values.location) : undefined,
         language: values.language,
+        aiOverview: Boolean(values['ai-overview']),
+        aiMode: Boolean(values['ai-mode']),
+        llm: Boolean(values.llm),
+        competitors: values.competitor,
       };
       const traffic = await trafficPlanFromFlags(values);
       const id = newCrawlId(resolved.startUrl);
       if (!emptyPlan(plan)) {
         if (!readSettings().paidApis) throw new PaidApisDisabled();
+        checkPlanBudget(estimatePlan(plan));
         if (!values.yes) {
           console.log(`This crawl's paid data will cost up to $${estimatePlan(plan).toFixed(3)}. Nothing was crawled. Re-run with --yes to spend it.`);
           return;
