@@ -39,6 +39,8 @@ Defaults: 2 requests per second per host, robots.txt respected, sitemaps read, e
 
 To render pages in Chrome, so content and links added by JavaScript are seen, add `--render`. It uses your installed Google Chrome with a throwaway profile, and is slower because each page is fetched and then rendered. Common analytics and ad requests are blocked, so crawling doesn't add visits to a site's reports. Results show what changed between the HTML as served and the rendered page.
 
+To keep each page's HTML, add `--store-html` (or tick **Keep page HTML** in the UI). It's off by default because it makes the crawl file larger. `sak export <id> --kind html --out pages.ndjson` then writes one `{"Address", "Status", "content"}` object per line, the same shape as Screaming Frog's bulk raw HTML export, so tools built for that export (such as the geo-cluster builder skill) read it as is. When `--render` is on, the stored HTML is the rendered page.
+
 `sak ui` can also start, pause, resume, re-run and delete crawls, and connect Google and Bing. Its Elements tab browses pages by SEO element, with filters such as duplicate titles or missing H1s, and exports any view to CSV.
 
 ## Claude (MCP)
@@ -154,7 +156,7 @@ sak inspect <crawl-id> --limit 500
 - Requests a page makes while rendering aren't counted by the rate limit or checked against robots.txt.
 - Bing query data per page isn't collected, because it needs one request per URL. Traffic isn't included in `sak compare`. The UI's date ranges are presets only.
 - No custom extraction, log file analysis, spelling or accessibility checks.
-- Crawls saved by an earlier version open normally, but only a new crawl fills in the newer page fields, response headers and site audit, because SAK doesn't store raw HTML. Their issues come from the fields they have.
+- Crawls saved by an earlier version open normally, but only a new crawl fills in the newer page fields, response headers and site audit, because SAK doesn't store raw HTML unless a crawl runs with `--store-html`. Their issues come from the fields they have.
 - CSS and scripts are fetched and checked, but not parsed, so files they load themselves, such as fonts or `@import`s, aren't found.
 - Structured data checks cover JSON-LD syntax and core properties. For Google's own rich-result verdict, use URL Inspection.
 - Pixel widths are estimates based on Arial metrics.

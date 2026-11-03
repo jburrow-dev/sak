@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS page_elements (
   js_only_links INTEGER,
   render_error TEXT
 );
+-- Filled only when a crawl runs with storeHtml. The HTML SAK parsed (rendered when rendering is on), gzipped.
+CREATE TABLE IF NOT EXISTS page_html (
+  url_id INTEGER PRIMARY KEY REFERENCES urls(id),
+  html BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS hreflang (
   url_id INTEGER NOT NULL REFERENCES urls(id),
   lang TEXT NOT NULL,
@@ -187,7 +192,7 @@ CREATE TABLE IF NOT EXISTS gbp_profile (
 );
 `;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const ADDED_COLUMNS: Record<string, Record<string, string>> = {
   // h2s stays NULL on crawls saved before it existed, so they don't read as "no H2" on every page.

@@ -163,6 +163,7 @@ async function startFromForm(body: any) {
     checkImages: body.checkImages !== false,
     checkResources: body.checkResources !== false,
     renderJs: Boolean(body.renderJs),
+    storeHtml: Boolean(body.storeHtml),
     seeds: strings(body.seeds, 'Seeds'),
     include: strings(body.include, 'Include patterns'),
     exclude: strings(body.exclude, 'Exclude patterns'),

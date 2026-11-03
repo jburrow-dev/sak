@@ -27,6 +27,8 @@ export interface CrawlConfig {
   seeds: string[];
   /** Request the start URL once as each AI bot's user agent. Only for sites you may test this way. */
   probeAiBots: boolean;
+  /** Keep each page's HTML, gzipped, so it can be exported with `sak export --kind html`. */
+  storeHtml: boolean;
 }
 
 export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
@@ -50,6 +52,7 @@ export const DEFAULT_CONFIG: Omit<CrawlConfig, 'startUrl'> = {
   crawlSubdomains: false,
   seeds: [],
   probeAiBots: false,
+  storeHtml: false,
 };
 
 export type UrlKind = 'page' | 'external' | 'image' | 'css' | 'script';

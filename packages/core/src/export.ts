@@ -1,5 +1,6 @@
 import { createWriteStream } from 'node:fs';
 import { finished } from 'node:stream/promises';
+import { gunzipSync } from 'node:zlib';
 import type { Db } from './db.ts';
 import { listIssues, listUrls, type Page } from './query.ts';
 
@@ -60,6 +61,30 @@ export async function exportCsv(db: Db, kind: ExportKind, path: string): Promise
   let count = -1;
   for (const row of rows(db, kind)) {
     if (!stream.write(`${row.map(csvCell).join(',')}\n`)) await new Promise<void>((resolve) => stream.once('drain', () => resolve()));
+    count += 1;
+  }
+  stream.end();
+  await finished(stream);
+  return count;
+}
+
+/** How many pages in a crawl have stored HTML. Zero unless it ran with storeHtml. */
+export function storedHtmlCount(db: Db): number {
+  return (db.prepare('SELECT COUNT(*) AS n FROM page_html').get() as { n: number }).n;
+}
+
+/**
+ * Writes stored HTML as NDJSON, one {"Address", "Status", "content"} object per line, in crawl order.
+ * Address and content match Screaming Frog's bulk raw HTML export, so tools built for it read this too.
+ */
+export async function exportHtml(db: Db, path: string): Promise<number> {
+  if (storedHtmlCount(db) === 0) throw new Error('This crawl has no stored HTML. Crawl again with --store-html (or "Keep page HTML" in the UI).');
+  const stream = createWriteStream(path);
+  let count = 0;
+  const sql = `SELECT u.url, r.status, h.html FROM page_html h JOIN urls u ON u.id = h.url_id LEFT JOIN responses r ON r.url_id = h.url_id ORDER BY u.id`;
+  for (const r of db.prepare(sql).iterate() as Iterable<{ url: string; status: number | null; html: Buffer }>) {
+    const line = JSON.stringify({ Address: r.url, Status: r.status, content: gunzipSync(r.html).toString('utf8') });
+    if (!stream.write(`${line}\n`)) await new Promise<void>((resolve) => stream.once('drain', () => resolve()));
     count += 1;
   }
   stream.end();

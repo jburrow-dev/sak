@@ -624,6 +624,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
   const [checkExternal, setCheckExternal] = useState<boolean>(config?.checkExternal ?? true);
   const [useSitemaps, setUseSitemaps] = useState<boolean>(config?.useSitemaps ?? true);
   const [crawlSubdomains, setCrawlSubdomains] = useState<boolean>(config?.crawlSubdomains ?? false);
+  const [storeHtml, setStoreHtml] = useState<boolean>(config?.storeHtml ?? false);
   const [maxUrls, setMaxUrls] = useState<string>(config?.maxUrls ? String(config.maxUrls) : '');
   const [rate, setRate] = useState<string>(config?.requestsPerSecond ? String(config.requestsPerSecond) : '');
   const [seeds, setSeeds] = useState<string>((config?.seeds ?? []).join('\n'));
@@ -651,7 +652,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
     setBusy(true);
     setError(null);
     post<{ id: string }>('/api/crawls', {
-      url, renderJs, checkResources, checkImages, checkExternal, useSitemaps, crawlSubdomains,
+      url, renderJs, checkResources, checkImages, checkExternal, useSitemaps, crawlSubdomains, storeHtml,
       maxUrls: maxUrls || undefined, requestsPerSecond: rate || undefined, seeds: lines(seeds), exclude: lines(exclude), include: config?.include,
       ...(spends ? { paid: { backlinks, volume, rank, keywords: keywordList }, confirmed: true } : {}),
       ...(traffic ? { traffic: trafficFromForm(traffic) } : {}),
@@ -674,6 +675,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
         <Check checked={checkExternal} onChange={setCheckExternal}>External links</Check>
         <Check checked={useSitemaps} onChange={setUseSitemaps}>Sitemaps</Check>
         <Check checked={crawlSubdomains} onChange={setCrawlSubdomains}>Include subdomains</Check>
+        <Check checked={storeHtml} onChange={setStoreHtml} note="Makes the crawl file larger. Needed for sak export --kind html, which tools like the geo-cluster builder read.">Keep page HTML</Check>
       </fieldset>
       <details open={Boolean(saved)}>
         <summary>Limits and scope</summary>

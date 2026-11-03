@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib';
 import type { CrawlConfig, PageFacts, UrlKind } from './types.ts';
 import { DEFAULT_CONFIG } from './types.ts';
 import { createCrawlDb, getMeta, openCrawlDb, setMeta, type Db } from './db.ts';
@@ -107,6 +108,7 @@ class Crawl {
       deleteLinks: db.prepare('DELETE FROM links WHERE source_id = ?'),
       insertPage: db.prepare(`INSERT OR REPLACE INTO page_elements (url_id, titles, meta_descriptions, h1s, h2s, meta_robots, canonicals, word_count, text_hash, html_bytes, script_count, has_empty_app_root, rendered, raw_word_count, js_only_links, render_error, signals)
         VALUES (@urlId, @titles, @metaDescriptions, @h1s, @h2s, @metaRobots, @canonicals, @wordCount, @textHash, @htmlBytes, @scriptCount, @hasEmptyAppRoot, @rendered, @rawWordCount, @jsOnlyLinks, @renderError, @signals)`),
+      insertHtml: db.prepare('INSERT OR REPLACE INTO page_html (url_id, html) VALUES (?, ?)'),
       deleteHreflang: db.prepare('DELETE FROM hreflang WHERE url_id = ?'),
       insertHreflang: db.prepare('INSERT INTO hreflang (url_id, lang, href) VALUES (?, ?, ?)'),
       deleteJsonLd: db.prepare('DELETE FROM structured_data WHERE url_id = ?'),
@@ -232,6 +234,7 @@ class Crawl {
         renderError: result.renderError ?? null,
         signals: JSON.stringify(renderChanges.length ? { ...facts.signals, renderChanges } : facts.signals),
       });
+      if (this.config.storeHtml && result.body !== null) this.statements.insertHtml.run(urlId, gzipSync(result.body));
       const nextDepth = depth === null ? null : depth + 1;
       const followLinks = !this.hasNofollow(facts, result.headers.get('x-robots-tag'));
       for (const link of facts.links) {

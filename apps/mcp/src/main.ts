@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import {
-  compareCrawls, crawlOverview, createCrawlDb, elementCatalog, elementCounts, exportCsv, isInternal, issuesSummary, getMeta, listCrawls, listElement, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, trafficPulls, urlInfo, urlLinks, withCrawl,
+  compareCrawls, crawlOverview, createCrawlDb, elementCatalog, elementCounts, exportCsv, exportHtml, isInternal, issuesSummary, getMeta, listCrawls, listElement, listIssues, listUrls, newCrawlId, normalizeUrl, openCrawlDb, resumeCrawl, sakHome, startCrawl, storedHtmlCount, trafficPulls, urlInfo, urlLinks, withCrawl,
   type CrawlConfig,
 } from '@sak/core';
 import { KeychainStore, emptyTrafficPlan, parseTrafficPlan, readTrafficPlan, resolveTrafficPlan, runSavedTrafficPlan, saveTrafficPlan, type TrafficPlan } from '@sak/integrations';
@@ -85,6 +85,7 @@ server.registerTool('crawl_start', {
     crawl_subdomains: z.boolean().optional().describe('Treat subdomains of the start host as part of the site'),
     seeds: z.array(z.string()).optional().describe('Extra in-scope start URLs, for sections nothing links to'),
     probe_ai_bots: z.boolean().optional().describe('Request the start URL once as each AI bot\'s user agent. Only when the user has confirmed they control the site or have permission.'),
+    store_html: z.boolean().optional().describe('Keep each page\'s HTML so it can be exported with export_csv kind "html". Makes the crawl file larger.'),
     traffic: trafficField.optional().describe('Free Search Console, GA4 and Bing data to collect once the crawl finishes'),
   },
 }, async (args) => {
@@ -105,6 +106,7 @@ server.registerTool('crawl_start', {
   if (args.render_js !== undefined) config.renderJs = args.render_js;
   if (args.crawl_subdomains !== undefined) config.crawlSubdomains = args.crawl_subdomains;
   if (args.probe_ai_bots) config.probeAiBots = true;
+  if (args.store_html) config.storeHtml = true;
   if (args.seeds) {
     for (const seed of args.seeds) {
       const url = normalizeUrl(seed);
@@ -275,14 +277,18 @@ const exportsDir = () => {
 };
 
 server.registerTool('export_csv', {
-  description: 'Write a crawl to a CSV file in ~/.sak/exports and return its path.',
-  inputSchema: { id: z.string(), kind: z.enum(['urls', 'issues', 'links']) },
+  description: 'Write a crawl to a file in ~/.sak/exports and return its path. urls, issues and links are CSV. html is NDJSON of {Address, Status, content}, one page per line, and needs a crawl run with store_html.',
+  inputSchema: { id: z.string(), kind: z.enum(['urls', 'issues', 'links', 'html']) },
 }, async ({ id, kind }) => {
   const db = openCrawlDb(id, { readonly: true });
   try {
     const dir = resolve(exportsDir());
-    const path = resolve(dir, `${id}-${kind}.csv`);
+    const path = resolve(dir, `${id}-${kind}.${kind === 'html' ? 'ndjson' : 'csv'}`);
     if (!path.startsWith(dir + sep)) return failure('Invalid crawl id');
+    if (kind === 'html') {
+      if (storedHtmlCount(db) === 0) return failure('This crawl has no stored HTML. Crawl again with store_html.');
+      return json({ path, pages: await exportHtml(db, path) });
+    }
     const rows = await exportCsv(db, kind, path);
     return json({ path, rows });
   } finally {

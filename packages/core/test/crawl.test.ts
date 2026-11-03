@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureSite } from './fixture-site.ts';
-import { compareCrawls, crawlOverview, exportCsv, issuesSummary, listCrawlIds, listIssues, listUrls, openCrawlDb, resumeCrawl, startCrawl, urlInfo, urlLinks, withCrawl, type Db, type Fetcher } from '../src/index.ts';
+import { compareCrawls, crawlOverview, exportCsv, exportHtml, issuesSummary, storedHtmlCount, listCrawlIds, listIssues, listUrls, openCrawlDb, resumeCrawl, startCrawl, urlInfo, urlLinks, withCrawl, type Db, type Fetcher } from '../src/index.ts';
 
 let server: Server;
 let origin: string;
@@ -133,6 +133,32 @@ describe('crawling the fixture site', () => {
     const lines = readFileSync(path, 'utf8').trim().split('\n');
     expect(lines.length).toBe(count + 1);
     expect(lines[0].startsWith('url,kind,status')).toBe(true);
+  });
+
+  it('stores no HTML by default and refuses an HTML export', async () => {
+    expect(storedHtmlCount(db)).toBe(0);
+    await expect(exportHtml(db, join(home, 'none.ndjson'))).rejects.toThrow(/store-html/);
+  });
+});
+
+describe('storing page HTML', () => {
+  it('keeps the HTML of each parsed page and exports it as NDJSON', async () => {
+    const crawl = await startCrawl({ startUrl: `${origin}/`, ...fast, storeHtml: true, useSitemaps: false, checkExternal: false }, {}, 'html');
+    const path = join(home, 'pages.ndjson');
+    const d = openCrawlDb(crawl, { readonly: true });
+    const count = await exportHtml(d, path);
+    const pages = storedHtmlCount(d);
+    const parsed = (d.prepare('SELECT COUNT(*) AS n FROM page_elements').get() as { n: number }).n;
+    d.close();
+    expect(count).toBe(pages);
+    expect(pages).toBe(parsed);
+    const records = readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { Address: string; Status: number; content: string });
+    expect(records.length).toBe(count);
+    const good = records.find((r) => r.Address === `${origin}/good`);
+    expect(good?.Status).toBe(200);
+    expect(good?.content).toMatch(/<html/i);
+    // Redirects and errors have no parsed body, so they aren't exported.
+    expect(records.some((r) => r.Address.endsWith('/redirect-one') || r.Address.endsWith('/missing'))).toBe(false);
   });
 });
 

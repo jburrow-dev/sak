@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import {
-  compareCrawls, crawlOverview, createCrawlDb, exportCsv, issuesSummary, listCrawls, listIssues, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, urlInfo, withCrawl,
+  compareCrawls, crawlOverview, createCrawlDb, exportCsv, exportHtml, issuesSummary, listCrawls, listIssues, newCrawlId, openCrawlDb, readSettings, resolveCrawlConfig, resumeCrawl, startCrawl, urlInfo, withCrawl,
   type CrawlConfig, type CrawlProgress, type ExportKind,
 } from '@sak/core';
 import { PaidApisDisabled, emptyPlan, estimatePlan, savePaidPlan, saveTrafficPlan, type PaidPlan } from '@sak/integrations';
@@ -14,7 +14,7 @@ Crawling
   sak crawl <url> [--max-urls N] [--max-depth N] [--rate N] [--concurrency N]
                   [--include REGEX]... [--exclude REGEX]... [--user-agent UA] [--header "K: V"]...
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
-                  [--no-resources] [--render] [--subdomains] [--seed URL]... [--probe-ai-bots]
+                  [--no-resources] [--render] [--subdomains] [--seed URL]... [--probe-ai-bots] [--store-html]
                   [--backlinks] [--keywords "a,b" --volume --rank --ai-mode] [--ai-overview] [--llm] [--competitor DOMAIN]... [--yes]
                   [--gsc PROPERTY] [--ga4 ID] [--bing SITE] [--days 30|60|90] [--account EMAIL] [--bing-key NAME]
                   [--top-queries] [--inspect N]
@@ -24,7 +24,7 @@ Crawling
 Results
   sak issues <id> [--type TYPE] [--limit N]
   sak url <id> <url>
-  sak export <id> --kind urls|issues|links --out PATH
+  sak export <id> --kind urls|issues|links|html --out PATH   (html: NDJSON, needs --store-html)
   sak compare <before-id> <after-id>
   sak audit <id>
   sak ui [--port N]
@@ -104,7 +104,7 @@ async function main() {
       property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
       gsc: { type: 'string' }, ga4: { type: 'string' }, bing: { type: 'string' }, account: { type: 'string' }, 'bing-key': { type: 'string' }, 'top-queries': { type: 'boolean' }, inspect: { type: 'string' }, label: { type: 'string' },
-      'probe-ai-bots': { type: 'boolean' }, 'ai-overview': { type: 'boolean' }, 'ai-mode': { type: 'boolean' }, llm: { type: 'boolean' }, competitor: { type: 'string', multiple: true },
+      'probe-ai-bots': { type: 'boolean' }, 'store-html': { type: 'boolean' }, 'ai-overview': { type: 'boolean' }, 'ai-mode': { type: 'boolean' }, llm: { type: 'boolean' }, competitor: { type: 'string', multiple: true },
       source: { type: 'string' }, file: { type: 'string' }, engine: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' }, brand: { type: 'string' }, samples: { type: 'string' },
       reviews: { type: 'string' }, 'no-posts': { type: 'boolean' }, monthly: { type: 'string' }, run: { type: 'string' },
     },
@@ -142,6 +142,7 @@ async function main() {
       if (values.subdomains) config.crawlSubdomains = true;
       if (values.seed) config.seeds = values.seed;
       if (values['probe-ai-bots']) config.probeAiBots = true;
+      if (values['store-html']) config.storeHtml = true;
       const resolved = resolveCrawlConfig(config);
       const plan: PaidPlan = {
         backlinks: Boolean(values.backlinks),
@@ -211,11 +212,12 @@ async function main() {
       return;
     }
     case 'export': {
-      const kind = (values.kind ?? 'urls') as ExportKind;
-      if (!positionals[0] || !values.out || !['urls', 'issues', 'links'].includes(kind)) throw new Error('Usage: sak export <id> --kind urls|issues|links --out PATH');
+      const kind = values.kind ?? 'urls';
+      if (!positionals[0] || !values.out || !['urls', 'issues', 'links', 'html'].includes(kind)) throw new Error('Usage: sak export <id> --kind urls|issues|links|html --out PATH');
       const db = openCrawlDb(positionals[0], { readonly: true });
       try {
-        console.log(`Wrote ${await exportCsv(db, kind, values.out)} rows to ${values.out}`);
+        if (kind === 'html') console.log(`Wrote ${await exportHtml(db, values.out)} pages to ${values.out}`);
+        else console.log(`Wrote ${await exportCsv(db, kind as ExportKind, values.out)} rows to ${values.out}`);
       } finally {
         db.close();
       }
