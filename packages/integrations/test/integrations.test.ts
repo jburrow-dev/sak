@@ -240,6 +240,35 @@ describe('per-crawl paid data', () => {
     writeSettings({ paidApis: true });
   });
 
+  it('lists backlinks and adds the status this crawl found where each one lands', async () => {
+    const db = crawlDb();
+    const page = db.prepare(`INSERT INTO urls (url, kind, state) VALUES (?, 'page', 'done')`);
+    const response = db.prepare(`INSERT INTO responses (url_id, status, fetched_at) VALUES (?, ?, '2026-11-03')`);
+    response.run(page.run('https://www.example.com/ok').lastInsertRowid, 200);
+    response.run(page.run('https://www.example.com/gone').lastInsertRowid, 404);
+    const items = [
+      { url_from: 'https://a.com/post', domain_from: 'a.com', url_to: 'https://www.example.com/gone', anchor: 'pests', dofollow: true, domain_from_rank: 300, backlink_spam_score: 2, url_to_status_code: 200 },
+      { url_from: 'https://b.com/', domain_from: 'b.com', url_to: 'https://www.example.com/ok', anchor: null, dofollow: false, domain_from_rank: 100, url_to_status_code: 200 },
+      { url_from: 'https://c.com/', domain_from: 'c.com', url_to: 'https://www.example.com/never-crawled', dofollow: true, url_to_status_code: 301 },
+    ];
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(JSON.parse(String(init.body))[0]).toMatchObject({ target: 'example.com', mode: 'one_per_domain', limit: 1000 });
+      return dfs([{ total_count: 592, items }], 0.0209);
+    });
+    await enrichCrawl(db, new DataForSeo(secrets, cache, fetchImpl as never), { backlinks: false, backlinkList: true, volume: false, rank: false, keywords: [] });
+    const [row] = readPaidData(db);
+    expect(row).toMatchObject({ kind: 'backlink_list', key: 'example.com', cost: 0.0209, error: null });
+    const { total, links } = row.value as any;
+    expect(total).toBe(592);
+    // The crawl saw a 404 that DataForSEO hasn't caught up with yet.
+    expect(links[0]).toMatchObject({ url_from: 'https://a.com/post', anchor: 'pests', dofollow: true, domain_rank: 300, spam_score: 2, crawl_url: 'https://www.example.com/gone', crawl_status: 404, url_to_status: 200 });
+    expect(links[1]).toMatchObject({ dofollow: false, crawl_status: 200 });
+    expect(links[2]).toMatchObject({ crawl_url: null, crawl_status: null, url_to_status: 301 });
+    expect(estimatePlan({ backlinks: false, backlinkList: true, volume: false, rank: false, keywords: [] })).toBeCloseTo(0.02 + 1000 * 0.00003);
+    expect(emptyPlan({ backlinks: false, backlinkList: true, volume: false, rank: false, keywords: [] })).toBe(false);
+    db.close();
+  });
+
   it('runs a saved plan only once, and only after the crawl finishes', async () => {
     const fetchImpl = vi.fn(answers);
     const client = new DataForSeo(secrets, cache, fetchImpl as never);

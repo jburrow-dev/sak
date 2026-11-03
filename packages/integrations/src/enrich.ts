@@ -1,10 +1,12 @@
 import { getMeta, setMeta, type Db } from '@sak/core';
-import { DataForSeo, ESTIMATED_COST } from './dataforseo.ts';
+import { BACKLINK_LIMIT, DataForSeo, ESTIMATED_COST, type BacklinkRow } from './dataforseo.ts';
 import { crawlResolver } from './match.ts';
 
 /** Optional DataForSEO data to collect for one crawl. */
 export interface PaidPlan {
   backlinks: boolean;
+  /** The linking pages themselves, one per referring domain, checked against the crawl. */
+  backlinkList?: boolean;
   volume: boolean;
   rank: boolean;
   keywords: string[];
@@ -22,12 +24,13 @@ export interface PaidPlan {
 const AI_KEYWORD_LIMIT = 100;
 const LLM_PAGE_LIMIT = 100;
 
-export const emptyPlan = (plan: PaidPlan) => !plan.backlinks && !plan.aiOverview && !plan.llm && !(plan.keywords.length > 0 && (plan.volume || plan.rank || plan.aiMode));
+export const emptyPlan = (plan: PaidPlan) => !plan.backlinks && !plan.backlinkList && !plan.aiOverview && !plan.llm && !(plan.keywords.length > 0 && (plan.volume || plan.rank || plan.aiMode));
 
 /** The most the plan can cost. Anything already cached is free, so it may cost less. */
 export function estimatePlan(plan: PaidPlan): number {
   const keywords = plan.keywords.length;
   return (plan.backlinks ? ESTIMATED_COST.backlinkSummary : 0)
+    + (plan.backlinkList ? ESTIMATED_COST.backlinkList + BACKLINK_LIMIT * ESTIMATED_COST.backlinkRow : 0)
     + (plan.volume && keywords > 0 ? ESTIMATED_COST.keywordVolume : 0)
     + (plan.rank ? keywords * ESTIMATED_COST.rankCheck : 0)
     + (plan.aiOverview ? ESTIMATED_COST.aiOverviewKeywords + AI_KEYWORD_LIMIT * ESTIMATED_COST.aiOverviewKeywordRow : 0)
@@ -48,6 +51,18 @@ export interface PaidRow {
 export function readPaidData(db: Db): PaidRow[] {
   const rows = db.prepare('SELECT kind, key, value, cost, cached, error, fetched_at FROM paid_data ORDER BY kind, key').all() as (Omit<PaidRow, 'value'> & { value: string | null })[];
   return rows.map((row) => ({ ...row, value: row.value === null ? null : JSON.parse(row.value) }));
+}
+
+/** A backlink with what this crawl found at the page it points to. */
+export interface CheckedBacklink extends BacklinkRow {
+  /** The crawled URL the link lands on, or null when the crawl didn't reach it. */
+  crawl_url: string | null;
+  crawl_status: number | null;
+}
+
+export interface BacklinkList {
+  total: number | null;
+  links: CheckedBacklink[];
 }
 
 const domainOf = (startUrl: string) => new URL(startUrl).hostname.replace(/^www\./, '');
@@ -85,6 +100,20 @@ export async function enrichCrawl(db: Db, client: DataForSeo, plan: PaidPlan): P
     if (url) cite.run(resolve(url)?.url ?? url, engine, subject, volume);
   };
   if (plan.backlinks) await record('backlinks', domain, () => client.backlinkSummary(domain, { confirmed: true }));
+  if (plan.backlinkList) {
+    // The cached answer is shared across crawls, so the crawl's own statuses are added on the way in.
+    const status = db.prepare('SELECT r.status FROM urls u JOIN responses r ON r.url_id = u.id WHERE u.url = ?');
+    await record('backlink_list', domain, async () => {
+      const answer = await client.backlinkList(domain, BACKLINK_LIMIT, { confirmed: true });
+      const links = answer.value.links.map((link): CheckedBacklink => {
+        const found = resolve(link.url_to);
+        const crawlUrl = found?.matched ? found.url : null;
+        const row = crawlUrl ? status.get(crawlUrl) as { status: number | null } | undefined : undefined;
+        return { ...link, crawl_url: crawlUrl, crawl_status: row?.status ?? null };
+      });
+      return { ...answer, value: { total: answer.value.total, links } satisfies BacklinkList };
+    });
+  }
   if (plan.volume && plan.keywords.length > 0) await record('volume', 'keywords', () => client.keywordVolume(plan.keywords, where, { confirmed: true }));
   if (plan.rank && plan.keywords.length > 0) {
     const rows = await record('rank', domain, () => client.rankCheck(domain, plan.keywords, where, { confirmed: true }));

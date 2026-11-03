@@ -172,3 +172,4 @@ a.btn { text-decoration: none; color: inherit; display: inline-block; }
   .rail-heading { flex-basis: 100%; margin: 6px 8px 0; }
   .freeze-first td:first-child, .freeze-first th:first-child { position: static; }
 }
+.backlinks { margin-top: 24px; }

@@ -15,7 +15,7 @@ Crawling
                   [--include REGEX]... [--exclude REGEX]... [--user-agent UA] [--header "K: V"]...
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
                   [--no-resources] [--render] [--subdomains] [--seed URL]... [--probe-ai-bots] [--store-html]
-                  [--backlinks] [--keywords "a,b" --volume --rank --ai-mode] [--ai-overview] [--llm] [--competitor DOMAIN]... [--yes]
+                  [--backlinks] [--backlink-list] [--keywords "a,b" --volume --rank --ai-mode] [--ai-overview] [--llm] [--competitor DOMAIN]... [--yes]
                   [--gsc PROPERTY] [--ga4 ID] [--bing SITE] [--days 30|60|90] [--account EMAIL] [--bing-key NAME]
                   [--top-queries] [--inspect N]
   sak resume <id>
@@ -46,7 +46,7 @@ Integrations
   sak crux <id>
   sak ai-import <id> --source gsc|bing --file PATH
   sak kw <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
-  sak backlinks <domain> [--refresh] [--yes]
+  sak backlinks <domain> [--list] [--refresh] [--yes]
   sak rank <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
   sak ai-overview <domain> [--limit 100] [--location 2840] [--language en] [--refresh] [--yes]
   sak ai-mode <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
@@ -58,7 +58,7 @@ Integrations
   sak paid [on|off]
 
 A crawl can be stopped with Ctrl-C and continued later with sak resume.
---backlinks, --volume and --rank collect paid DataForSEO data once the crawl finishes.
+--backlinks, --backlink-list, --volume and --rank collect paid DataForSEO data once the crawl finishes.
 --gsc, --ga4 and --bing collect free search and analytics data once the crawl finishes, over 30 days by default.`;
 
 function progressLine(progress: CrawlProgress) {
@@ -99,7 +99,7 @@ async function main() {
       'user-agent': { type: 'string' }, header: { type: 'string', multiple: true },
       robots: { type: 'string' }, 'robots-file': { type: 'string' },
       'no-sitemaps': { type: 'boolean' }, 'no-external': { type: 'boolean' }, 'no-images': { type: 'boolean' }, 'no-resources': { type: 'boolean' }, render: { type: 'boolean' }, subdomains: { type: 'boolean' }, seed: { type: 'string', multiple: true },
-      backlinks: { type: 'boolean' }, keywords: { type: 'string' }, volume: { type: 'boolean' }, rank: { type: 'boolean' },
+      backlinks: { type: 'boolean' }, 'backlink-list': { type: 'boolean' }, list: { type: 'boolean' }, keywords: { type: 'string' }, volume: { type: 'boolean' }, rank: { type: 'boolean' },
       type: { type: 'string' }, limit: { type: 'string' }, kind: { type: 'string' }, out: { type: 'string' }, port: { type: 'string' },
       property: { type: 'string' }, days: { type: 'string' }, strategy: { type: 'string' }, url: { type: 'string', multiple: true },
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
@@ -146,6 +146,7 @@ async function main() {
       const resolved = resolveCrawlConfig(config);
       const plan: PaidPlan = {
         backlinks: Boolean(values.backlinks),
+        backlinkList: Boolean(values['backlink-list']),
         volume: Boolean(values.volume),
         rank: Boolean(values.rank),
         keywords: (values.keywords ?? '').split(',').map((k) => k.trim()).filter(Boolean),

@@ -9,7 +9,7 @@ import {
   type CrawlConfig,
 } from '@sak/core';
 import {
-  ApiCache, DEFAULT_INSPECTIONS, DataForSeo, ESTIMATED_COST, INSPECTIONS_PER_DAY, KeychainStore, TRAFFIC_DAYS, addBingKey, disconnectGoogle, emptyPlan, emptyTrafficPlan, googleAccounts, googleLogin, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveBingAccount, resolveGoogleAccount, resolveTrafficPlan, runSavedPaidPlan, runSavedTrafficPlan, savePaidPlan, saveTrafficPlan, suggestProperty,
+  ApiCache, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, ESTIMATED_COST, INSPECTIONS_PER_DAY, KeychainStore, TRAFFIC_DAYS, addBingKey, disconnectGoogle, emptyPlan, emptyTrafficPlan, enrichCrawl, estimatePlan, googleAccounts, googleLogin, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveBingAccount, resolveGoogleAccount, resolveTrafficPlan, runSavedPaidPlan, runSavedTrafficPlan, savePaidPlan, saveTrafficPlan, suggestProperty,
   type PaidPlan, type PropertyOption, type TrafficPlan, type TrafficSource,
 } from '@sak/integrations';
 
@@ -182,6 +182,7 @@ async function startFromForm(body: any) {
 
   const plan: PaidPlan | null = body.paid ? {
     backlinks: Boolean(body.paid.backlinks),
+    backlinkList: Boolean(body.paid.backlinkList),
     volume: Boolean(body.paid.volume),
     rank: Boolean(body.paid.rank),
     keywords: strings(body.paid.keywords, 'Keywords'),
@@ -201,6 +202,38 @@ async function startFromForm(body: any) {
   }
   launch(id, (signal) => startCrawl(config, { signal }, id));
   return { id };
+}
+
+/** Paid data for a crawl that has already finished. Without confirmed it only returns the estimate. */
+async function addPaidData(id: string, body: any) {
+  if (running.has(id)) throw badRequest('This crawl is still working. Wait for it to finish.', 409);
+  if (withCrawl(id, (db) => getMeta(db, 'status')) !== 'finished') throw badRequest('Paid data can only be added to a finished crawl.', 409);
+  const plan: PaidPlan = { backlinks: Boolean(body?.backlinks), backlinkList: Boolean(body?.backlinkList), volume: false, rank: false, keywords: [] };
+  if (emptyPlan(plan)) throw badRequest('Choose some data to collect');
+  if (!readSettings().paidApis) throw badRequest('Paid APIs are switched off, so nothing was spent.', 409);
+  const cache = new ApiCache();
+  try {
+    try {
+      new DataForSeo(new KeychainStore(), cache).checkBudget(estimatePlan(plan));
+    } catch (error) {
+      throw badRequest((error as Error).message, 409);
+    }
+  } finally {
+    cache.close();
+  }
+  if (body?.confirmed !== true) return { needs_confirmation: true, estimated_cost_usd: estimatePlan(plan) };
+  launch(id, async () => {
+    const db = openCrawlDb(id);
+    const cache = new ApiCache();
+    try {
+      await enrichCrawl(db, new DataForSeo(new KeychainStore(), cache), plan);
+    } finally {
+      cache.close();
+      db.close();
+    }
+    return id;
+  });
+  return { id, status: 'collecting' };
 }
 
 async function handlePost(path: string, body: any): Promise<unknown> {
@@ -235,7 +268,7 @@ async function handlePost(path: string, body: any): Promise<unknown> {
     else await removeBingKey(new KeychainStore(), resolveBingAccount(account));
     return connections();
   }
-  const match = path.match(/^\/api\/crawls\/([\w.-]+)\/(pause|resume|traffic|inspect|delete)$/);
+  const match = path.match(/^\/api\/crawls\/([\w.-]+)\/(pause|resume|traffic|inspect|paid|delete)$/);
   if (!match) throw badRequest('Not found', 404);
   const [, id, action] = match;
   if (action === 'delete') {
@@ -245,6 +278,7 @@ async function handlePost(path: string, body: any): Promise<unknown> {
     deleteCrawl(id);
     return { id, status: 'deleted' };
   }
+  if (action === 'paid') return addPaidData(id, body);
   if (action === 'traffic' || action === 'inspect') {
     if (running.has(id)) throw badRequest('This crawl is still working. Wait for it to finish.', 409);
     if (withCrawl(id, (db) => getMeta(db, 'status')) !== 'finished') throw badRequest('Search and analytics data can only be added to a finished crawl.', 409);

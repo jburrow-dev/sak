@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
 import { readFileSync } from 'node:fs';
 import { getMeta, openCrawlDb, readSettings, readSiteAudit, runAnalysis, trafficPulls, withCrawl, writeSettings, type Db } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, KeychainStore, addBingKey, budgetStatus, checkBudget, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAiExport, importAiReferrals, importAnalytics, importGbp, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runCrux, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type LlmEngine, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
+import { ApiCache, BACKLINK_LIMIT, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, KeychainStore, addBingKey, budgetStatus, checkBudget, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAiExport, importAiReferrals, importAnalytics, importGbp, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runCrux, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type BacklinkList, type LlmEngine, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
 
 const KEYS: Record<string, string> = {
   dataforseo: 'DataForSEO login:password',
@@ -45,7 +45,9 @@ export function checkPlanBudget(estimate: number): void {
 
 export function printPaidData(id: string): void {
   for (const row of withCrawl(id, readPaidData)) {
-    console.log(row.error ? `paid  ${row.kind}: ${row.error}` : `paid  ${row.kind} ($${row.cost.toFixed(4)}): ${JSON.stringify(row.value)}`);
+    // A full backlink list is too long to print here. The web UI and crawl_enrich show the rows.
+    const value = row.kind === 'backlink_list' && row.value ? { total: (row.value as BacklinkList).total, links: (row.value as BacklinkList).links.length } : row.value;
+    console.log(row.error ? `paid  ${row.kind}: ${row.error}` : `paid  ${row.kind} ($${row.cost.toFixed(4)}): ${JSON.stringify(value)}`);
   }
 }
 
@@ -305,6 +307,9 @@ export async function runIntegrationCommand(command: string, positionals: string
         } else if (command === 'kw') {
           const answer = await paid((o) => client.keywordVolume(positionals, where, o));
           if (answer) { console.table(answer.value); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }
+        } else if (command === 'backlinks' && values.list) {
+          const answer = await paid((o) => client.backlinkList(positionals[0], BACKLINK_LIMIT, o));
+          if (answer) { console.log(`${answer.value.links.length} of ${answer.value.total ?? 'an unknown number of'} referring domains.`); console.table(answer.value.links.map(({ url_from, url_to, anchor, dofollow, domain_rank }) => ({ url_from, url_to, anchor, dofollow, domain_rank }))); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }
         } else if (command === 'backlinks') {
           const answer = await paid((o) => client.backlinkSummary(positionals[0], o));
           if (answer) { console.log(answer.value); console.log(answer.cached ? `From cache, fetched ${answer.fetchedAt}. Free.` : `Cost: $${answer.cost}`); }

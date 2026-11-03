@@ -63,6 +63,11 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
     inputSchema: { target: z.string().describe('Domain without https:// or www.'), confirm: confirmField, refresh: refreshField },
   }, ({ target, confirm, refresh }) => paid((client) => client.backlinkSummary(target, { confirmed: confirm, refresh })));
 
+  server.registerTool('backlinks_list', {
+    description: 'Paid. The live backlinks to a domain, one per referring domain, strongest first: linking page, linked page, anchor, dofollow, domain rank, spam score and dates. Cached results are free. Without confirm it returns the estimated cost and spends nothing. To check where the links land against a crawl, use crawl_enrich with backlink_list.',
+    inputSchema: { target: z.string().describe('Domain without https:// or www.'), limit: z.number().int().min(1).max(1000).optional().describe('Rows to return (default 1,000). Priced per row.'), confirm: confirmField, refresh: refreshField },
+  }, ({ target, limit, confirm, refresh }) => paid((client) => client.backlinkList(target, limit, { confirmed: confirm, refresh })));
+
   server.registerTool('rank_check', {
     description: 'Paid. Live Google top-10 position of a domain for each keyword, plus whether an AI Overview appeared and cited it. Cached results are free. Without confirm it returns the estimated cost and spends nothing.',
     inputSchema: { domain: z.string(), keywords: z.array(z.string()).min(1), ...whereFields, confirm: confirmField, refresh: refreshField },
@@ -140,10 +145,11 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
   });
 
   server.registerTool('crawl_enrich', {
-    description: 'Paid. Store DataForSEO data with a finished crawl: backlinks for its domain, search volume, rank or AI Mode citations for the given keywords, AI Overview keywords, and citations in AI answers against competitors. Without confirm it returns the most it can cost and spends nothing. Without any options it returns what is already stored.',
+    description: 'Paid. Store DataForSEO data with a finished crawl: backlinks for its domain (totals, or with backlink_list the linking pages checked against the crawl), search volume, rank or AI Mode citations for the given keywords, AI Overview keywords, and citations in AI answers against competitors. Without confirm it returns the most it can cost and spends nothing. Without any options it returns what is already stored.',
     inputSchema: {
       id: z.string(),
       backlinks: z.boolean().optional(),
+      backlink_list: z.boolean().optional().describe('Up to 1,000 backlinks, one per referring domain, each with the status the crawl found at the linked page'),
       volume: z.boolean().optional(),
       rank: z.boolean().optional(),
       keywords: z.array(z.string()).max(1000).optional(),
@@ -154,8 +160,8 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
       ...whereFields,
       confirm: confirmField,
     },
-  }, ({ id, backlinks, volume, rank, keywords, ai_overview, ai_mode, llm, competitors, location, language, confirm }) => {
-    const plan = { backlinks: Boolean(backlinks), volume: Boolean(volume), rank: Boolean(rank), keywords: keywords ?? [], location, language, aiOverview: Boolean(ai_overview), aiMode: Boolean(ai_mode), llm: Boolean(llm), competitors };
+  }, ({ id, backlinks, backlink_list, volume, rank, keywords, ai_overview, ai_mode, llm, competitors, location, language, confirm }) => {
+    const plan = { backlinks: Boolean(backlinks), backlinkList: Boolean(backlink_list), volume: Boolean(volume), rank: Boolean(rank), keywords: keywords ?? [], location, language, aiOverview: Boolean(ai_overview), aiMode: Boolean(ai_mode), llm: Boolean(llm), competitors };
     return withWritableCrawl(id, async (db) => {
       if (emptyPlan(plan)) return readPaidData(db);
       if (!readSettings().paidApis) throw new PaidApisDisabled();

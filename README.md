@@ -62,7 +62,7 @@ Credentials are stored in the macOS Keychain.
 
 DataForSEO calls are cached for good and only re-fetched with `--refresh`. A call that would cost money shows an estimate and stops until you pass `--yes`.
 
-A crawl on its own never spends. To store paid data with a crawl, turn it on in the New crawl form, or add `--backlinks`, or `--keywords "a,b"` with `--volume` and `--rank`, plus `--yes`. It runs once the crawl finishes.
+A crawl on its own never spends. To store paid data with a crawl, turn it on in the New crawl form, or add `--backlinks`, or `--keywords "a,b"` with `--volume` and `--rank`, plus `--yes`. It runs once the crawl finishes. `--backlink-list` (or **List of backlinks**) stores up to 1,000 backlinks, one per referring domain, each with the status the crawl found where it lands, so links to broken pages stand out. A finished crawl can get the list from its Search data tab. `sak backlinks <domain> --list` prints the same list without a crawl.
 
 `sak paid off`, or the switch on the UI's Usage screen, stops all DataForSEO calls from the CLI, the UI and Claude. Cached results still work.
 

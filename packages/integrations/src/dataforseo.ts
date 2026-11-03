@@ -9,6 +9,8 @@ const API = 'https://api.dataforseo.com/v3/';
 export const ESTIMATED_COST = {
   keywordVolume: 0.09, // per request, up to 1,000 keywords
   backlinkSummary: 0.02, // per request
+  backlinkList: 0.02, // per request, plus backlinkRow per row
+  backlinkRow: 0.00003,
   rankCheck: 0.003, // per keyword, top 10 results with AI Overview. Measured at 0.002.
   aiOverviewKeywords: 0.01, // per request, plus aiOverviewKeywordRow per row
   aiOverviewKeywordRow: 0.0006, // Measured at 0.00052.
@@ -217,6 +219,23 @@ function parseProfile(item: any): GbpProfile {
   };
 }
 
+/** The most backlinks/backlinks/live returns in one request. */
+export const BACKLINK_LIMIT = 1000;
+
+export interface BacklinkRow {
+  url_from: string;
+  domain_from: string | null;
+  url_to: string;
+  anchor: string | null;
+  dofollow: boolean;
+  domain_rank: number | null;
+  spam_score: number | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  /** The status DataForSEO last saw for the linked page. */
+  url_to_status: number | null;
+}
+
 export interface KeywordVolumeRow {
   keyword: string;
   search_volume: number | null;
@@ -321,6 +340,20 @@ export class DataForSeo {
         referring_domains_nofollow: r.referring_domains_nofollow ?? null, broken_backlinks: r.broken_backlinks ?? null, spam_score: r.backlinks_spam_score ?? null,
       };
     });
+  }
+
+  /** One link per referring domain, strongest domains first, so the first 1,000 rows are the ones worth reading. */
+  backlinkList(target: string, limit = BACKLINK_LIMIT, options: CallOptions = {}) {
+    if (limit < 1 || limit > BACKLINK_LIMIT) throw new Error(`Ask for 1 to ${BACKLINK_LIMIT} backlinks`);
+    const task = { target, backlinks_status_type: 'live', mode: 'one_per_domain', limit, order_by: ['domain_from_rank,desc'] };
+    return this.cached('backlinks/backlinks/live', task, ESTIMATED_COST.backlinkList + limit * ESTIMATED_COST.backlinkRow, `Backlinks list for ${target}`, options, (result): { total: number | null; links: BacklinkRow[] } => ({
+      total: result[0]?.total_count ?? null,
+      links: (result[0]?.items ?? []).map((item: any): BacklinkRow => ({
+        url_from: item.url_from, domain_from: item.domain_from ?? null, url_to: item.url_to, anchor: item.anchor ?? null,
+        dofollow: Boolean(item.dofollow), domain_rank: item.domain_from_rank ?? null, spam_score: item.backlink_spam_score ?? null,
+        first_seen: item.first_seen ?? null, last_seen: item.last_seen ?? null, url_to_status: item.url_to_status_code ?? null,
+      })),
+    }));
   }
 
   /** One request per keyword. The price is checked once up front for the whole list. */

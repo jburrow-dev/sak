@@ -16,7 +16,7 @@ interface UrlRow { url: string; kind: string; status: number | null; depth: numb
 interface Link { url: string; type: string; anchor: string | null; nofollow: number; status: number | null }
 interface ElementColumn { key: string; label: string; type: 'url' | 'text' | 'number' | 'status' | 'bytes' | 'yesno' }
 interface ElementInfo { key: string; label: string; columns: ElementColumn[]; filters: { key: string; label: string }[] }
-interface Settings { paidApis: boolean; monthlyBudgetUsd: number; runBudgetUsd: number; prices: { keywordVolume: number; backlinkSummary: number; rankCheck: number } }
+interface Settings { paidApis: boolean; monthlyBudgetUsd: number; runBudgetUsd: number; prices: { keywordVolume: number; backlinkSummary: number; backlinkList: number; backlinkRow: number; rankCheck: number } }
 
 const hostOf = (url: string | null) => { try { return url ? new URL(url).host : 'Unknown'; } catch { return url ?? 'Unknown'; } };
 const siteOf = (url: string | null) => hostOf(url).replace(/^www\./, '');
@@ -513,7 +513,106 @@ function CompareView({ crawl, crawls, route, summary }: { crawl: string; crawls:
   );
 }
 
+interface Backlink { url_from: string; domain_from: string | null; url_to: string; anchor: string | null; dofollow: boolean; domain_rank: number | null; spam_score: number | null; first_seen: string | null; last_seen: string | null; url_to_status: number | null; crawl_url: string | null; crawl_status: number | null }
+interface BacklinkList { total: number | null; links: Backlink[] }
+
+/** The crawl's own status where it reached the page, otherwise the one DataForSEO last saw. */
+const landing = (link: Backlink) => link.crawl_status ?? link.url_to_status;
+const BACKLINK_FILTERS: { key: string; label: string; test: (link: Backlink) => boolean }[] = [
+  { key: 'all', label: 'All', test: () => true },
+  { key: 'broken', label: 'Land on errors', test: (link) => (landing(link) ?? 0) >= 400 },
+  { key: 'redirected', label: 'Land on redirects', test: (link) => { const status = landing(link) ?? 0; return status >= 300 && status < 400; } },
+  { key: 'nofollow', label: 'Nofollow', test: (link) => !link.dofollow },
+];
+const BACKLINK_PAGE = 100;
+
+const csvCell = (value: unknown) => (value === null || value === undefined ? '' : /[",\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value));
+
+function downloadBacklinks(links: Backlink[], name: string) {
+  const columns: (keyof Backlink)[] = ['url_from', 'domain_from', 'url_to', 'anchor', 'dofollow', 'domain_rank', 'spam_score', 'first_seen', 'last_seen', 'url_to_status', 'crawl_url', 'crawl_status'];
+  const body = [columns.join(','), ...links.map((link) => columns.map((column) => csvCell(link[column])).join(','))].join('\n');
+  const href = URL.createObjectURL(new Blob([body], { type: 'text/csv;charset=utf-8' }));
+  const anchor = Object.assign(document.createElement('a'), { href, download: `${name}-backlinks.csv` });
+  anchor.click();
+  URL.revokeObjectURL(href);
+}
+
+function BacklinksTable({ crawl, list }: { crawl: string; list: BacklinkList }) {
+  const [filter, setFilter] = useState('all');
+  const [offset, setOffset] = useState(0);
+  const test = BACKLINK_FILTERS.find((f) => f.key === filter)?.test ?? (() => true);
+  const shown = list.links.filter(test);
+  const page = { total: shown.length, offset, limit: BACKLINK_PAGE, items: shown.slice(offset, offset + BACKLINK_PAGE) };
+  return (
+    <section className="backlinks">
+      <h3>Backlinks</h3>
+      <p className="subtle">One link per referring domain, strongest domains first. Where a link lands is the status this crawl found, or DataForSEO's when the crawl didn't reach that page.</p>
+      <div className="toolbar">
+        <div className="chips" role="group" aria-label="Filter backlinks">
+          {BACKLINK_FILTERS.map((f) => (
+            <button key={f.key} className={`chip ${filter === f.key ? 'active' : ''}`} aria-pressed={filter === f.key} onClick={() => { setFilter(f.key); setOffset(0); }}>
+              {f.label} <span>{list.links.filter(f.test).length.toLocaleString('en-US')}</span>
+            </button>
+          ))}
+        </div>
+        <button className="btn push-right" onClick={() => downloadBacklinks(shown, crawl)}>Download CSV</button>
+      </div>
+      {shown.length === 0 ? <div className="panel empty">No backlinks match this filter.</div> : (
+        <div className="panel"><table><thead><tr><th>Linking page</th><th>Links to</th><th>Anchor</th><th className="num">Domain rank</th><th className="num">Lands on</th></tr></thead>
+          <tbody>{page.items.map((link) => (
+            <tr key={link.url_from + link.url_to}>
+              <td className="url"><a href={link.url_from} target="_blank" rel="noreferrer">{link.url_from}</a>{!link.dofollow && <small className="subtle block">nofollow</small>}</td>
+              <td className="url">{link.crawl_url ? <RouteLink className="row-link" href={hrefWith({ url: link.crawl_url })}>{link.url_to}</RouteLink> : link.url_to}</td>
+              <td>{link.anchor || <span className="subtle">none</span>}</td>
+              <td className="num">{link.domain_rank ?? ''}</td>
+              <td className="num"><Status value={landing(link)} />{landing(link) !== null && <small className="subtle block">{link.crawl_status !== null ? 'this crawl' : 'DataForSEO'}</small>}</td>
+            </tr>
+          ))}</tbody></table></div>
+      )}
+      <Pager page={page} onOffset={setOffset} />
+    </section>
+  );
+}
+
+/** Offers the backlink list on a finished crawl, showing the most it can cost before anything is spent. */
+function GetBacklinks({ crawl, onChanged }: { crawl: string; onChanged: () => void }) {
+  const { data: settings } = useApi<Settings>('/api/settings');
+  const [estimate, setEstimate] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!settings) return null;
+  if (!settings.paidApis) return <p className="subtle">To list the actual backlinks, allow DataForSEO spending in <RouteLink href={hrefFor({ view: 'usage' })}>Usage</RouteLink>.</p>;
+  const ask = (confirmed: boolean) => {
+    setBusy(true);
+    setError(null);
+    post<{ estimated_cost_usd?: number }>(`/api/crawls/${crawl}/paid`, { backlinkList: true, confirmed }).then((answer) => {
+      setBusy(false);
+      if (confirmed) onChanged();
+      else setEstimate(answer.estimated_cost_usd ?? null);
+    }, (e) => { setError(e.message); setBusy(false); });
+  };
+  return (
+    <div className="toolbar">
+      {estimate === null ? (
+        <button className="btn" disabled={busy} onClick={() => ask(false)}>List the backlinks</button>
+      ) : (
+        <>
+          <button className="btn primary" disabled={busy} onClick={() => ask(true)}>Spend up to {money(estimate)}</button>
+          <button className="btn" disabled={busy} onClick={() => setEstimate(null)}>Cancel</button>
+          <span className="subtle">Up to 1,000 backlinks, one per referring domain. Cached results are free.</span>
+        </>
+      )}
+      {error && <span className="status-bad">{error}</span>}
+    </div>
+  );
+}
+
 function PaidValue({ kind, value }: { kind: string; value: any }) {
+  if (kind === 'backlink_list') {
+    const list = value as BacklinkList;
+    const broken = list.links.filter(BACKLINK_FILTERS[1].test).length;
+    return <span>{list.links.length.toLocaleString('en-US')} of {(list.total ?? list.links.length).toLocaleString('en-US')} referring domains listed below{broken ? `. ${broken} land on error pages` : ''}</span>;
+  }
   if (kind === 'backlinks') return <span>{value.backlinks ?? 'No'} backlinks from {value.referring_domains ?? 0} domains, rank {value.rank ?? 'none'}{value.spam_score !== null ? `, spam score ${value.spam_score}` : ''}</span>;
   if (kind === 'ai_overview') return <span>Cited in AI Overviews for {value.total ?? value.keywords?.length ?? 0} keywords. See AI citations in the Elements tab.</span>;
   if (kind === 'llm_pages') return <span>{(value as any[]).filter((row) => row.own).length} of your pages among {(value as any[]).length} cited pages.</span>;
@@ -530,27 +629,35 @@ function PaidValue({ kind, value }: { kind: string; value: any }) {
   );
 }
 
-function SearchDataView({ crawl, refresh }: { crawl: string; refresh: number }) {
+function SearchDataView({ crawl, refresh, overview, onChanged }: { crawl: string; refresh: number; overview: Crawl; onChanged: () => void }) {
   const { data, error } = useApi<{ kind: string; key: string; value: any; cost: number; cached: number; error: string | null }[]>(`/api/crawls/${crawl}/paid`, refresh);
-  const labels: Record<string, string> = { backlinks: 'Backlinks', volume: 'Search volume', rank: 'Google rank', ai_overview: 'AI Overview keywords', ai_mode: 'AI Mode', llm_citations: 'AI citations', llm_pages: 'AI-cited pages', budget: 'Spending limit' };
+  const labels: Record<string, string> = { backlinks: 'Backlinks', backlink_list: 'Backlinks list', volume: 'Search volume', rank: 'Google rank', ai_overview: 'AI Overview keywords', ai_mode: 'AI Mode', llm_citations: 'AI citations', llm_pages: 'AI-cited pages', budget: 'Spending limit' };
   if (error) return <Failure message={error} />;
   if (!data) return <TableSkeleton />;
-  if (data.length === 0) return <div className="panel empty">This crawl did not collect any backlink, rank or AI citation data. Turn on paid data in the New crawl form to collect it.</div>;
+  const list = data.find((row) => row.kind === 'backlink_list' && !row.error)?.value as BacklinkList | undefined;
+  const offer = !list && overview.status === 'finished' && (overview.running
+    ? <p className="subtle">Collecting data. This updates when it finishes.</p>
+    : <GetBacklinks crawl={crawl} onChanged={onChanged} />);
+  if (data.length === 0) return <><div className="panel empty">This crawl did not collect any backlink, rank or AI citation data. Turn on paid data in the New crawl form to collect it.</div>{offer}</>;
   return (
-    <div className="panel"><table><thead><tr><th>Data</th><th>Result</th><th className="num">Cost</th></tr></thead>
-      <tbody>{data.map((row) => (
-        <tr key={`${row.kind}-${row.key}`}>
-          <td>{labels[row.kind] ?? row.kind}</td>
-          <td>{row.error ? <span className="status-bad">{row.error}</span> : <PaidValue kind={row.kind} value={row.value} />}</td>
-          <td className="num">{row.cached ? 'Cached' : money(row.cost)}</td>
-        </tr>
-      ))}</tbody></table></div>
+    <>
+      <div className="panel"><table><thead><tr><th>Data</th><th>Result</th><th className="num">Cost</th></tr></thead>
+        <tbody>{data.map((row) => (
+          <tr key={`${row.kind}-${row.key}`}>
+            <td>{labels[row.kind] ?? row.kind}</td>
+            <td>{row.error ? <span className="status-bad">{row.error}</span> : <PaidValue kind={row.kind} value={row.value} />}</td>
+            <td className="num">{row.cached ? 'Cached' : money(row.cost)}</td>
+          </tr>
+        ))}</tbody></table></div>
+      {offer}
+      {list && <BacklinksTable crawl={crawl} list={list} />}
+    </>
   );
 }
 
 function endpointLabel(endpoint: string): string {
   const known: [RegExp, string][] = [
-    [/search_volume\/live$/, 'Search volume'], [/^backlinks\/summary/, 'Backlink summary'], [/^serp\/google\/organic/, 'Google rank'],
+    [/search_volume\/live$/, 'Search volume'], [/^backlinks\/summary/, 'Backlink summary'], [/^backlinks\/backlinks/, 'Backlinks list'], [/^serp\/google\/organic/, 'Google rank'],
     [/ranked_keywords/, 'AI Overview keywords'], [/^serp\/google\/ai_mode/, 'AI Mode'], [/llm_mentions\/target_metrics/, 'AI citations'],
     [/llm_mentions\/multi_target_metrics/, 'AI citations, compared'], [/top_mentioned_pages/, 'AI-cited pages'], [/ai_keyword_data/, 'AI search volume'],
     [/llm_responses/, 'AI model prompt'],
@@ -631,6 +738,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
   const [exclude, setExclude] = useState<string>((config?.exclude ?? []).join('\n'));
   const [paidOn, setPaidOn] = useState(false);
   const [backlinks, setBacklinks] = useState(true);
+  const [backlinkList, setBacklinkList] = useState(false);
   const [volume, setVolume] = useState(false);
   const [rank, setRank] = useState(false);
   const [keywords, setKeywords] = useState('');
@@ -641,7 +749,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
   const keywordList = lines(keywords);
   const prices = settings?.prices;
   const estimate = paidOn && prices
-    ? (backlinks ? prices.backlinkSummary : 0) + (volume && keywordList.length ? prices.keywordVolume : 0) + (rank ? keywordList.length * prices.rankCheck : 0)
+    ? (backlinks ? prices.backlinkSummary : 0) + (backlinkList ? prices.backlinkList + 1000 * prices.backlinkRow : 0) + (volume && keywordList.length ? prices.keywordVolume : 0) + (rank ? keywordList.length * prices.rankCheck : 0)
     : 0;
   const allowed = settings?.paidApis ?? false;
   const spends = allowed && estimate > 0;
@@ -654,7 +762,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
     post<{ id: string }>('/api/crawls', {
       url, renderJs, checkResources, checkImages, checkExternal, useSitemaps, crawlSubdomains, storeHtml,
       maxUrls: maxUrls || undefined, requestsPerSecond: rate || undefined, seeds: lines(seeds), exclude: lines(exclude), include: config?.include,
-      ...(spends ? { paid: { backlinks, volume, rank, keywords: keywordList }, confirmed: true } : {}),
+      ...(spends ? { paid: { backlinks, backlinkList, volume, rank, keywords: keywordList }, confirmed: true } : {}),
       ...(traffic ? { traffic: trafficFromForm(traffic) } : {}),
     }).then(({ id }) => navigate(hrefFor({ crawl: id }), { replace: true }), (e) => { setError(e.message); setBusy(false); });
   };
@@ -697,6 +805,7 @@ function NewCrawlForm({ saved }: { saved: SavedRun | null }) {
         {paidOn && allowed && (
           <div className="paid-options">
             <Check checked={backlinks} onChange={setBacklinks}>Backlink summary for this domain</Check>
+            <Check checked={backlinkList} onChange={setBacklinkList} note="Up to 1,000, one per referring domain, each checked against the crawl.">List of backlinks</Check>
             <Check checked={volume} onChange={setVolume}>Search volume for the keywords below</Check>
             <Check checked={rank} onChange={setRank}>Google rank for the keywords below</Check>
             {(volume || rank) && <div className="field"><label htmlFor="keywords">Keywords, one per line</label><textarea id="keywords" rows={3} value={keywords} onChange={(e) => setKeywords(e.target.value)} /></div>}
@@ -913,7 +1022,7 @@ export function App() {
                   ) : tab === 'urls' ? (
                     <UrlsView key={active} crawl={active} refresh={tick} route={route} />
                   ) : tab === 'data' ? (
-                    <SearchDataView key={active} crawl={active} refresh={tick} />
+                    <SearchDataView key={active} crawl={active} refresh={tick} overview={detail.overview} onChanged={refresh} />
                   ) : tab === 'compare' ? (
                     <CompareView key={active} crawl={active} crawls={crawls ?? []} route={route} summary={detail.summary} />
                   ) : (
