@@ -102,6 +102,8 @@ export const ISSUES: Record<string, IssueDefinition> = {
   ai_snippet_restricted: { severity: 'notice', title: 'Snippet controls limit AI use', fix: 'nosnippet and max-snippet:0 limit what AI Overviews can use. Confirm this is intended.' },
   ai_bot_blocked: { severity: 'warning', title: 'robots.txt blocks an AI search bot', fix: 'Allow it if you want to appear in that product\'s answers. Training bots are listed separately and raise no issue.' },
   ai_bot_refused: { severity: 'notice', title: 'Server refused an AI bot user agent', fix: 'Check your firewall rules. This may be a false alarm: a request naming a bot, sent from another IP, can be refused as an impostor while the real bot gets through.' },
+  ai_training_token_misspelled: { severity: 'warning', title: 'robots.txt misspells the AI training policy token', fix: 'Write it exactly as User-Agent: __usage_ai-training. Providers match the name exactly, so this group states no preference.' },
+  ai_training_conflict: { severity: 'notice', title: 'A training bot\'s own rules override the AI training preference', fix: 'Rules naming a bot win over the shared token. Google follows Google-Extended when it is named. Align the two, unless that provider should be treated differently.' },
   cwv_lcp_poor: { severity: 'warning', title: 'Poor Largest Contentful Paint', fix: 'Over 4 seconds. Speed up the server and the largest image or text block.' },
   cwv_inp_poor: { severity: 'warning', title: 'Poor Interaction to Next Paint', fix: 'Over 500 ms. Reduce long JavaScript tasks.' },
   cwv_cls_poor: { severity: 'warning', title: 'Poor Cumulative Layout Shift', fix: 'Over 0.25. Reserve space for images, ads and embeds.' },

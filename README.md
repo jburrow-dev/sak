@@ -75,6 +75,7 @@ SAK keeps three kinds of AI data apart, because they answer different questions.
 **Readiness, free, from every crawl.** The **AI readiness** and **AI bots** Elements views, plus issues:
 
 - Which AI bots `robots.txt` allows, split into search, user and training bots. Blocking a training bot raises no issue, because that's a policy choice.
+- The shared AI training preference, a `User-Agent: __usage_ai-training` group from an [IETF draft](https://datatracker.ietf.org/doc/draft-kelley-aipref-training-preference-signal/) that [Google plans to honour in 2027](https://developers.google.com/search/blog/2026/10/ai-training-control). It's listed with the training bots. Opting out raises no issue. A misspelled token raises one, and so does a training bot named in its own group that disagrees, because that bot's own rules win. Google says it follows an explicit Google-Extended over the token.
 - Pages whose content needs JavaScript, whose snippets are restricted, or where JavaScript changes SEO elements.
 - Schema types, dates, authors, question-style headings, lists and tables. These are signals to review, and there's no proof that they drive citations.
 - `llms.txt`. A missing file raises no issue, because there's little evidence yet that it affects visibility.

@@ -1,5 +1,5 @@
 import type { Db } from '../db.ts';
-import { readSiteAudit, type SiteAudit } from '../site-audit.ts';
+import { readSiteAudit, TRAINING_TOKEN, type SiteAudit } from '../site-audit.ts';
 import type { IssueFinding, UrlRow } from '../types.ts';
 
 const MAX_SITEMAP_URLS = 50_000;
@@ -62,6 +62,17 @@ export function checkAiBots(robotsUrl: string, bots: { name: string; purpose: st
   return out;
 }
 
+/** Opting out of training is a policy choice, so only a token that can't work or is overridden raises an issue. */
+export function checkTrainingPreference(audit: SiteAudit): IssueFinding[] {
+  if (!audit.training) return [];
+  const { url } = audit.robots;
+  const out: IssueFinding[] = audit.training.misspelled.map((agent) => ({ type: 'ai_training_token_misspelled', url, detail: agent }));
+  for (const { bot, allowed } of audit.training.conflicts) {
+    out.push({ type: 'ai_training_conflict', url, detail: `${bot} is ${allowed ? 'allowed' : 'disallowed'} at the start URL, where ${TRAINING_TOKEN} opts ${allowed ? 'out' : 'in'}` });
+  }
+  return out;
+}
+
 /** Crawls saved before the site audit existed have nothing to check. */
 export function runAuditChecks(db: Db, startUrl: string, urls: UrlRow[]): IssueFinding[] {
   const audit = readSiteAudit(db);
@@ -73,5 +84,6 @@ export function runAuditChecks(db: Db, startUrl: string, urls: UrlRow[]): IssueF
     ...checkLlmsFile(audit),
     ...checkHosts(audit, startUrl, urls.find((u) => u.url === startUrl)),
     ...checkAiBots(audit.robots.url, bots, startUrl),
+    ...checkTrainingPreference(audit),
   ];
 }

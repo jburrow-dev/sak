@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG, collectSiteAudit, elementCatalog, elementCounts, listElement, listIssues, openCrawlDb, parseHtml, readSiteAudit, runAnalysis, simhash, startCrawl, withCrawl } from '../src/index.ts';
-import { checkAiBots, checkHosts, checkLlmsFile, checkRobotsFile, checkSitemapFiles } from '../src/checks/audit.ts';
+import { checkAiBots, checkHosts, checkLlmsFile, checkRobotsFile, checkSitemapFiles, checkTrainingPreference } from '../src/checks/audit.ts';
 import { checkGbpProfile, readSiteBusiness, type GbpRow } from '../src/checks/gbp.ts';
 import { checkHead, checkImages, checkRenderChanges, checkSnippetControls, checkSoft404, checkStructuredData, schemaTypes, type PageInput } from '../src/checks/page.ts';
 import { checkAnchors, checkDelivery, checkMixedContent, checkNearDuplicates, checkStatuses, checkUrlShape, linkScores, type SiteInput } from '../src/checks/site.ts';
@@ -247,6 +247,49 @@ describe('collecting the site audit', () => {
     const { audit } = await collectSiteAudit({ ...config, startUrl: 'http://127.0.0.1:9/' }, null, fetchImpl);
     expect(audit).toMatchObject({ https: null, hostTwin: null });
     expect(calls).toHaveLength(2);
+  });
+
+  const training = async (robots: string) => {
+    const { fetchImpl } = answers({ 'http://127.0.0.1:9/robots.txt': text(robots), 'http://127.0.0.1:9/llms.txt': text('') });
+    const result = await collectSiteAudit({ ...config, startUrl: 'http://127.0.0.1:9/' }, null, fetchImpl);
+    return { ...result.audit.training!, row: result.bots.find((bot) => bot.name === '__usage_ai-training')!, findings: checkTrainingPreference(result.audit) };
+  };
+
+  it('never reads the * group as a training preference', async () => {
+    const result = await training('User-agent: *\nDisallow: /\n');
+    expect(result).toMatchObject({ declared: false, optOut: null, conflicts: [], findings: [] });
+    expect(result.row).toMatchObject({ purpose: 'training', robots_allowed: null, probe_status: null });
+  });
+
+  it('reads how much of the site the training token opts out', async () => {
+    expect(await training('User-Agent: __usage_ai-training\nDisallow: /\n')).toMatchObject({ declared: true, optOut: 'all', row: { robots_allowed: 0 } });
+    expect(await training('User-Agent: __USAGE_AI-TRAINING\nDisallow: /\nAllow: /press-kit/\n')).toMatchObject({ optOut: 'some', row: { robots_allowed: 0 } });
+    expect(await training('User-agent: __usage_ai-training\nDisallow: /private/\n')).toMatchObject({ optOut: 'some', row: { robots_allowed: 1 } });
+    expect(await training('User-agent: __usage_ai-training\nAllow: /\n')).toMatchObject({ optOut: 'none', row: { robots_allowed: 1 } });
+  });
+
+  it('shares a group with other tokens', async () => {
+    const result = await training('User-agent: __usage_ai-training\nUser-agent: GPTBot\nDisallow: /\n\nUser-agent: *\nAllow: /\n');
+    expect(result).toMatchObject({ declared: true, optOut: 'all', conflicts: [], findings: [] });
+  });
+
+  it('flags a training bot named in its own group that disagrees, but not one left to *', async () => {
+    const result = await training('User-agent: __usage_ai-training\nDisallow: /\n\nUser-agent: Google-Extended\nAllow: /\n\nUser-agent: *\nAllow: /\n');
+    expect(result.conflicts).toEqual([{ bot: 'Google-Extended', owner: 'Google', allowed: true }]);
+    expect(result.findings).toEqual([{ type: 'ai_training_conflict', url: 'http://127.0.0.1:9/robots.txt', detail: 'Google-Extended is allowed at the start URL, where __usage_ai-training opts out' }]);
+    const optIn = await training('User-agent: __usage_ai-training\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /\n');
+    expect(optIn.findings.map((f) => f.detail)).toEqual(['GPTBot is disallowed at the start URL, where __usage_ai-training opts in']);
+  });
+
+  it('flags near misses of the token, which state nothing', async () => {
+    const result = await training('User-agent: usage_ai-training\nUser-agent: __usage_ai_training\nUser-agent: AI-Training # comment\nDisallow: /\n');
+    expect(result.declared).toBe(false);
+    expect(result.misspelled).toEqual(['usage_ai-training', '__usage_ai_training', 'AI-Training']);
+    expect(types(result.findings)).toEqual(['ai_training_token_misspelled', 'ai_training_token_misspelled', 'ai_training_token_misspelled']);
+  });
+
+  it('checks nothing on crawls saved before the training preference existed', () => {
+    expect(checkTrainingPreference({ robots: { url: 'r', status: 200, error: null, sitemaps: 1, blockedSearchBots: [] }, sitemaps: null, llms: { url: 'l', status: 404, contentType: null, hasHeading: false }, https: null, hostTwin: null })).toEqual([]);
   });
 
   it('turns a failed robots.txt fetch into a finding, not a failed crawl', async () => {
