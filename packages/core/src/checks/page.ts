@@ -224,6 +224,32 @@ export function checkImages(page: PageInput): IssueFinding[] {
   return out;
 }
 
+// Working limits, not published ones: retrieval systems commonly cut passages of a few hundred tokens.
+export const SECTION_MAX_WORDS = 500;
+const BACK_REFERENCE_MIN = 3;
+const BACK_REFERENCE_SHARE = 0.25;
+
+/** How the text splits into passages. Older crawls have no passage signals, so these stay quiet. */
+export function checkPassages(page: PageInput): IssueFinding[] {
+  const signals = page.signals;
+  if (!signals) return [];
+  const out: IssueFinding[] = [];
+  const sections = signals.sectionWords ?? [];
+  const long = sections.filter((words) => words > SECTION_MAX_WORDS);
+  if (long.length) {
+    const where = signals.longestSectionHeading ? `under "${signals.longestSectionHeading}"` : sections.length > 1 ? 'before the first heading' : 'on a page with no h1–h3 headings';
+    const longest = `${Math.max(...long)} words ${where}`;
+    out.push({ type: 'section_too_long', url: page.url, detail: long.length === 1 ? longest : `${long.length} sections, longest ${longest}` });
+  }
+  // The patterns are English, so other languages are skipped. Pages that don't declare one are checked.
+  const english = !signals.htmlLang || /^en(-|$)/i.test(signals.htmlLang);
+  const { paragraphs = 0, backReferences = 0 } = signals;
+  if (english && backReferences >= BACK_REFERENCE_MIN && backReferences / paragraphs >= BACK_REFERENCE_SHARE) {
+    out.push({ type: 'paragraph_context_dependent', url: page.url, detail: `${backReferences} of ${paragraphs} paragraphs, such as "${signals.backReferenceSample}"` });
+  }
+  return out;
+}
+
 export function checkSnippetControls(page: PageInput): IssueFinding[] {
   const directives = [...page.metaRobots, page.xRobots ?? ''].join(',');
   const restrictive = /\bnosnippet\b/i.test(directives) ? 'nosnippet' : /\bmax-snippet\s*:\s*0\b/i.test(directives) ? 'max-snippet:0' : null;
@@ -236,6 +262,6 @@ export function checkRenderChanges(page: PageInput): IssueFinding[] {
 
 export function runPageChecks(page: PageInput): IssueFinding[] {
   // Snippet and content problems only matter on pages meant to appear in search.
-  const searchChecks = page.indexable ? [checkTitles, checkMeta, checkHeadings, checkContent, checkSoft404, checkHead, checkImages, checkSnippetControls] : [];
+  const searchChecks = page.indexable ? [checkTitles, checkMeta, checkHeadings, checkContent, checkSoft404, checkHead, checkImages, checkSnippetControls, checkPassages] : [];
   return [...searchChecks, checkDirectives, checkHreflang, checkStructuredData, checkRendering, checkRenderChanges].flatMap((check) => check(page));
 }

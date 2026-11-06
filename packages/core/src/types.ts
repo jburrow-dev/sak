@@ -98,6 +98,16 @@ export interface PageSignals {
   tables: number;
   firstParagraphWords: number | null;
   dataNosnippet: number;
+  // The passage signals below are missing on crawls made before they were added.
+  /** Words under each h1–h3 heading, plus any text before the first one. */
+  sectionWords?: number[];
+  longestSectionHeading?: string | null;
+  /** Text blocks of eight or more words, and how many of them open by pointing back at earlier text. */
+  paragraphs?: number;
+  backReferences?: number;
+  backReferenceSample?: string | null;
+  /** A short hash and word count for each block of three or more words, to find text repeated across pages. */
+  textBlocks?: [string, number][];
   /** SEO elements that differ between the HTML as served and the rendered page. */
   renderChanges?: string[];
 }

@@ -7,6 +7,8 @@ export interface SitePage {
   textHash: string | null;
   canonical: string | null;
   simhash?: string | null;
+  wordCount?: number;
+  textBlocks?: [string, number][] | null;
 }
 
 export interface SiteLink {
@@ -172,7 +174,34 @@ export function checkNearDuplicates(pages: SitePage[], urls: UrlRow[]): IssueFin
   return [...closest].map(([url, other]) => ({ type: 'near_duplicate', url, detail: `Very similar to ${other}` }));
 }
 
-const GENERIC_ANCHOR = /^(click here|here|read more|learn more|more|this page|link|details)$/i;
+// A block counts as repeated when it appears on this page and at least two others.
+const REPEAT_MIN_PAGES = 3;
+const REPEATED_SHARE = 0.5;
+const REPEAT_MIN_WORDS = 100;
+
+/** Pages whose text is mostly blocks shared with other pages. Exact duplicates count as one page, since they have their own issue. */
+export function checkRepeatedText(pages: SitePage[], urls: UrlRow[]): IssueFinding[] {
+  const indexable = new Set(urls.filter((u) => u.indexable === 1).map((u) => u.url));
+  const candidates = pages.filter((p) => p.textBlocks?.length && indexable.has(p.url));
+  const seenText = new Set<string>();
+  const pagesWithBlock = new Map<string, number>();
+  for (const page of candidates) {
+    if (page.textHash) {
+      if (seenText.has(page.textHash)) continue;
+      seenText.add(page.textHash);
+    }
+    for (const hash of new Set(page.textBlocks!.map(([hash]) => hash))) pagesWithBlock.set(hash, (pagesWithBlock.get(hash) ?? 0) + 1);
+  }
+  return candidates.flatMap((page) => {
+    const total = page.wordCount ?? 0;
+    if (total < REPEAT_MIN_WORDS) return [];
+    const repeated = page.textBlocks!.reduce((sum, [hash, words]) => sum + ((pagesWithBlock.get(hash) ?? 0) >= REPEAT_MIN_PAGES ? words : 0), 0);
+    const share = repeated / total;
+    return share >= REPEATED_SHARE ? [{ type: 'content_repeated', url: page.url, detail: `${Math.round(share * 100)}% of ${total} words` }] : [];
+  });
+}
+
+const GENERIC_ANCHOR =/^(click here|here|read more|learn more|more|this page|link|details)$/i;
 
 export function checkAnchors(input: SiteInput): IssueFinding[] {
   const internal = new Set(input.urls.filter((u) => u.kind === 'page').map((u) => u.url));
@@ -324,6 +353,7 @@ export function runSiteChecks(input: SiteInput, chains: RedirectChain[]): IssueF
     ...checkMixedContent(input),
     ...checkUrlShape(input.urls),
     ...checkNearDuplicates(input.pages, input.urls),
+    ...checkRepeatedText(input.pages, input.urls),
     ...checkAnchors(input),
   ];
 }

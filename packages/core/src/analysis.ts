@@ -104,6 +104,8 @@ export function runAnalysis(db: Db): void {
       textHash: p.text_hash,
       canonical: p.canonicals[0] ?? p.link_canonical,
       simhash: p.signals?.simhash ?? null,
+      wordCount: p.word_count,
+      textBlocks: p.signals?.textBlocks ?? null,
     })),
     links: db.prepare('SELECT s.url AS source, t.url AS target, l.type, l.anchor FROM links l JOIN urls s ON s.id = l.source_id JOIN urls t ON t.id = l.target_id').all() as SiteInput['links'],
     hreflang,

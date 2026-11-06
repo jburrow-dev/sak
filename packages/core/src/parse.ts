@@ -10,18 +10,100 @@ const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
 // so <li>one</li><li>two</li> counts as two words rather than "onetwo".
 const WORD_INTERNAL_TAGS = new Set(['b', 'i', 'em', 'strong', 'span', 'u', 's', 'sub', 'sup', 'small', 'mark', 'abbr', 'code', 'font', 'wbr']);
 
-function visibleText(nodes: AnyNode[], out: string[] = []): string[] {
-  for (const node of nodes) {
-    if (node.type === 'text') {
-      out.push(node.data);
-    } else if ('children' in node) {
-      const joinsWords = node.type === 'tag' && WORD_INTERNAL_TAGS.has(node.name);
-      if (!joinsWords) out.push(' ');
-      visibleText(node.children, out);
-      if (!joinsWords) out.push(' ');
+// Elements that start a new block of text. Others, such as links, only separate words, so a
+// paragraph with a link in it stays one block. <br> counts because some sites use it between paragraphs.
+const BLOCK_TAGS = new Set(['address', 'article', 'aside', 'blockquote', 'br', 'caption', 'dd', 'details', 'dialog', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr', 'li', 'main', 'ol', 'p', 'pre', 'section', 'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul']);
+// Headings that start a new section. Retrieval systems that split at headings usually stop at h3.
+const SECTION_TAGS = new Set(['h1', 'h2', 'h3']);
+const MINOR_HEADING_TAGS = new Set(['h4', 'h5', 'h6']);
+
+type BlockKind = 'section' | 'heading' | 'text';
+interface TextBlock {
+  kind: BlockKind;
+  text: string;
+}
+
+/** Visible text split into blocks, such as paragraphs, list items and headings, in document order. */
+function textBlocks(nodes: AnyNode[]): TextBlock[] {
+  const blocks: TextBlock[] = [];
+  let parts: string[] = [];
+  const flush = (kind: BlockKind) => {
+    const text = clean(parts.join(''));
+    parts = [];
+    if (text) blocks.push({ kind, text });
+  };
+  const walk = (list: AnyNode[], kind: BlockKind) => {
+    for (const node of list) {
+      if (node.type === 'text') {
+        parts.push(node.data);
+      } else if (!('children' in node)) {
+        continue;
+      } else if (node.type === 'tag' && WORD_INTERNAL_TAGS.has(node.name)) {
+        walk(node.children, kind);
+      } else if (node.type === 'tag' && BLOCK_TAGS.has(node.name)) {
+        const own: BlockKind = SECTION_TAGS.has(node.name) ? 'section' : MINOR_HEADING_TAGS.has(node.name) ? 'heading' : kind;
+        flush(kind);
+        walk(node.children, own);
+        flush(own);
+      } else {
+        parts.push(' ');
+        walk(node.children, kind);
+        parts.push(' ');
+      }
+    }
+  };
+  walk(nodes, 'text');
+  flush('text');
+  return blocks;
+}
+
+const countWords = (text: string) => text.split(' ').length;
+
+// A paragraph that opens with a pronoun, or points "above", doesn't say what it is about when read alone.
+const BACK_REFERENCE = /^(?:it|they|he|she|its|their)\b|^(?:this|that|these|those)(?:'s\b|[,.;:]|\s+(?:is|are|was|were|means|makes|made|allows|lets|helps|can|could|will|would|should|may|might|also|has|have|had|gives|ensures|includes?|requires?|depends|works)\b)|\bas (?:mentioned|noted|discussed|described|explained|shown|stated|outlined) (?:above|earlier|before|previously)\b|\bsee (?:above|below)\b|\bthe above\b|\bmentioned (?:above|earlier)\b/i;
+// "It is important to..." uses "it" as a placeholder, not to point back.
+const PLACEHOLDER_IT = /^it(?:'s| is| was)\s+(?:\S+\s+){1,2}?(?:to|that)\b/i;
+const PARAGRAPH_MIN_WORDS = 8;
+const MAX_SECTIONS = 200;
+const MAX_TEXT_BLOCKS = 1000;
+const TEXT_BLOCK_MIN_WORDS = 3;
+
+/** How the text would split into passages, how many paragraphs lean on earlier text, and block hashes for finding repeated text. */
+function passageSignals(blocks: TextBlock[]): Pick<PageSignals, 'sectionWords' | 'longestSectionHeading' | 'paragraphs' | 'backReferences' | 'backReferenceSample' | 'textBlocks'> {
+  const sections: { heading: string | null; words: number }[] = [];
+  let current: { heading: string | null; words: number } = { heading: null, words: 0 };
+  let paragraphs = 0;
+  let backReferences = 0;
+  let backReferenceSample: string | null = null;
+  for (const block of blocks) {
+    if (block.kind === 'section') {
+      if (current.heading !== null || current.words > 0) sections.push(current);
+      current = { heading: block.text, words: 0 };
+      continue;
+    }
+    const words = countWords(block.text);
+    current.words += words;
+    if (block.kind !== 'text' || words < PARAGRAPH_MIN_WORDS) continue;
+    paragraphs++;
+    const text = block.text.replace(/[‘’]/g, "'");
+    if (BACK_REFERENCE.test(text) && !PLACEHOLDER_IT.test(text)) {
+      backReferences++;
+      backReferenceSample ??= `${text.split(' ').slice(0, 8).join(' ')}…`;
     }
   }
-  return out;
+  if (current.heading !== null || current.words > 0) sections.push(current);
+  const longest = sections.reduce<{ heading: string | null; words: number } | null>((best, s) => (!best || s.words > best.words ? s : best), null);
+  return {
+    sectionWords: sections.slice(0, MAX_SECTIONS).map((s) => s.words),
+    longestSectionHeading: longest?.heading?.slice(0, 80) ?? null,
+    paragraphs,
+    backReferences,
+    backReferenceSample,
+    textBlocks: blocks
+      .filter((block) => countWords(block.text) >= TEXT_BLOCK_MIN_WORDS)
+      .slice(0, MAX_TEXT_BLOCKS)
+      .map((block) => [createHash('sha1').update(block.text.toLowerCase()).digest('hex').slice(0, 12), countWords(block.text)]),
+  };
 }
 
 const SIMHASH_MIN_WORDS = 100;
@@ -151,8 +233,9 @@ export function parseHtml(html: string, pageUrl: string): PageFacts {
 
   // Word count and duplicate detection look at page content, so menus and footers don't count.
   $('script, style, noscript, template, nav, footer').remove();
-  const text = clean(visibleText($('body').contents().toArray()).join(''));
-  const wordCount = text ? text.split(' ').length : 0;
+  const blocks = textBlocks($('body').contents().toArray());
+  const text = blocks.map((block) => block.text).join(' ');
+  const wordCount = text ? countWords(text) : 0;
   const firstParagraph = clean($('main p, article p, body p').first().text());
 
   return {
@@ -170,7 +253,7 @@ export function parseHtml(html: string, pageUrl: string): PageFacts {
     htmlBytes: Buffer.byteLength(html),
     scriptCount,
     hasEmptyAppRoot,
-    signals: { ...signals, simhash: text ? simhash(text) : null, firstParagraphWords: firstParagraph ? firstParagraph.split(' ').length : null },
+    signals: { ...signals, simhash: text ? simhash(text) : null, firstParagraphWords: firstParagraph ? firstParagraph.split(' ').length : null, ...passageSignals(blocks) },
   };
 }
 
