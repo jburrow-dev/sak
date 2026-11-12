@@ -36,6 +36,7 @@ const TASK_WAIT_MS = 180_000;
 const TASK_POLL_MS = 5_000;
 // DataForSEO's codes for a task that hasn't finished.
 const TASK_NOT_READY = new Set([40601, 40602]);
+const RANK_ENDPOINT = 'serp/google/organic/live/advanced';
 
 export class CostConfirmationRequired extends Error {
   estimate: number;
@@ -94,9 +95,9 @@ export function collectReferences(value: unknown, out: { domain: string | null; 
   return out;
 }
 
-const bareDomain = (domain: string) => domain.replace(/^www\./, '').toLowerCase();
-const isDomain = (candidate: string | null | undefined, bare: string) => Boolean(candidate) && (bareDomain(candidate!) === bare || bareDomain(candidate!).endsWith(`.${bare}`));
-const hostOf = (url: string) => {
+export const bareDomain = (domain: string) => domain.replace(/^www\./, '').toLowerCase();
+export const isDomain = (candidate: string | null | undefined, bare: string) => Boolean(candidate) && (bareDomain(candidate!) === bare || bareDomain(candidate!).endsWith(`.${bare}`));
+export const hostOf = (url: string) => {
   try {
     return new URL(url).hostname;
   } catch {
@@ -114,11 +115,31 @@ export function organicTarget(item: any): { domain: string | null; url: string |
   return { domain: host, url: host ? `https://${host}/` : null };
 }
 
+/** ChatGPT adds utm_source=openai to every link, which would stop the URL matching a crawled page. */
+function withoutTracking(url: string): string {
+  if (!url.includes('utm_source=openai')) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.delete('utm_source');
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 /** Gemini links through a Google redirect, so the real address is in direct_url, or failing that its title holds the domain. */
 function citedUrl(note: any): string | null {
   if (note.direct_url) return note.direct_url;
   if (hostOf(note.url ?? '')?.endsWith('vertexaisearch.cloud.google.com')) return /^[\w-]+(\.[\w-]+)+$/.test(note.title ?? '') ? `https://${note.title}/` : null;
-  return note.url ?? null;
+  return note.url ? withoutTracking(note.url) : null;
+}
+
+export interface LlmAnswer {
+  text: string;
+  cited: string[];
+  fan_out_queries: string[];
+  /** Pages the model's search returned, cited or not. Null when the engine doesn't report them. */
+  retrieved: string[] | null;
 }
 
 export interface AiAnswerRow {
@@ -282,6 +303,12 @@ export class DataForSeo {
     checkBudget(this.cache, estimate);
   }
 
+  /** For a cost about to be put to the user: refuses first if paid APIs are off or a limit would be passed. */
+  checkSpend(estimate: number): void {
+    requirePaidApis();
+    checkBudget(this.cache, estimate);
+  }
+
   private async authHeader(): Promise<string> {
     const credentials = await this.secrets.get('dataforseo');
     if (!credentials) throw new Error('DataForSEO is not set up. Run: sak key set dataforseo (enter login:password)');
@@ -357,12 +384,21 @@ export class DataForSeo {
   }
 
   /** One request per keyword. The price is checked once up front for the whole list. */
+  // Without load_async_ai_overview, Google's slower overviews come back empty.
+  private rankTasks(keywords: string[], where: { location: number; language: string }) {
+    return keywords.map((keyword) => ({ keyword, location_code: where.location, language_code: where.language, depth: 10, load_async_ai_overview: true }));
+  }
+
+  /** How many of these keywords a rank check would have to pay for. */
+  rankMisses(domain: string, keywords: string[], where: { location: number; language: string }): number {
+    return this.rankTasks(keywords, where).filter((task) => !this.cache.get(RANK_ENDPOINT, { ...task, domain })).length;
+  }
+
   async rankCheck(domain: string, keywords: string[], where: { location: number; language: string }, options: CallOptions = {}) {
     if (keywords.length === 0) throw new Error('Provide at least one keyword');
-    // Without load_async_ai_overview, Google's slower overviews come back empty.
-    const tasks = keywords.map((keyword) => ({ keyword, location_code: where.location, language_code: where.language, depth: 10, load_async_ai_overview: true }));
-    const endpoint = 'serp/google/organic/live/advanced';
-    const misses = options.refresh ? tasks.length : tasks.filter((task) => !this.cache.get(endpoint, { ...task, domain })).length;
+    const tasks = this.rankTasks(keywords, where);
+    const endpoint = RANK_ENDPOINT;
+    const misses = options.refresh ? tasks.length : this.rankMisses(domain, keywords, where);
     if (misses > 0) {
       requirePaidApis();
       checkBudget(this.cache, misses * ESTIMATED_COST.rankCheck);
@@ -482,6 +518,23 @@ export class DataForSeo {
       (result[0]?.items ?? []).map((item: any) => ({ keyword: item.keyword, ai_search_volume: item.ai_search_volume ?? null, monthly: item.ai_monthly_searches ?? [] })) as { keyword: string; ai_search_volume: number | null; monthly: { year: number; month: number; ai_search_volume: number }[] }[]);
   }
 
+  private llmTasks(prompt: string, model: string, samples: number) {
+    return Array.from({ length: samples }, (_, sample) => ({ user_prompt: prompt, model_name: model, web_search: true, max_output_tokens: 1024, tag: `sample-${sample}` }));
+  }
+
+  /** Answers cached before retrieved pages were kept have no such field, so they count as missing. */
+  private llmHit(endpoint: string, task: Record<string, unknown>, age: number) {
+    const hit = this.cache.get<LlmAnswer>(endpoint, task, age);
+    return hit && hit.value.retrieved !== undefined ? hit : null;
+  }
+
+  /** How many samples of this prompt would have to be paid for. */
+  llmPromptMisses(engine: LlmEngine, prompt: string, model: string, samples = 3, options: CallOptions = {}): number {
+    const tasks = this.llmTasks(prompt, model, samples);
+    if (options.refresh) return tasks.length;
+    return tasks.filter((task) => !this.llmHit(`ai_optimization/${engine}/llm_responses/live`, task, options.maxAgeDays ?? AI_CACHE_DAYS)).length;
+  }
+
   /**
    * Asks a model the same prompt several times, because answers vary between runs, and reports rates
    * rather than one answer. This goes through the model's API, which may not match its consumer app.
@@ -490,19 +543,19 @@ export class DataForSeo {
     if (prompt.length > 500) throw new Error('A prompt can be up to 500 characters');
     const endpoint = `ai_optimization/${engine}/llm_responses/live`;
     const age = options.maxAgeDays ?? AI_CACHE_DAYS;
-    const tasks = Array.from({ length: samples }, (_, sample) => ({ user_prompt: prompt, model_name: model, web_search: true, max_output_tokens: 1024, tag: `sample-${sample}` }));
-    const misses = options.refresh ? tasks.length : tasks.filter((task) => !this.cache.get(endpoint, task, age)).length;
+    const tasks = this.llmTasks(prompt, model, samples);
+    const misses = this.llmPromptMisses(engine, prompt, model, samples, options);
     const estimate = misses * ESTIMATED_COST.llmPrompt;
     if (misses > 0) {
       requirePaidApis();
       checkBudget(this.cache, estimate);
       if (!options.confirmed) throw new CostConfirmationRequired(estimate, `${samples} samples of this prompt on ${engine}`);
     }
-    type Answer = { text: string; cited: string[]; fan_out_queries: string[] };
-    const answers: Answer[] = [];
+    const unique = (urls: (string | null)[]) => [...new Set(urls.filter((url): url is string => Boolean(url)))];
+    const answers: LlmAnswer[] = [];
     let cost = 0;
     for (const task of tasks) {
-      const hit = options.refresh ? null : this.cache.get<Answer>(endpoint, task, age);
+      const hit = options.refresh ? null : this.llmHit(endpoint, task, age);
       if (hit) {
         answers.push(hit.value);
         continue;
@@ -510,10 +563,11 @@ export class DataForSeo {
       const reply = await this.post(endpoint, task);
       const result = reply.result[0] ?? {};
       const sections = (result.items ?? []).filter((item: any) => item.type === 'message').flatMap((item: any) => item.sections ?? []).filter((section: any) => section.type === 'text');
-      const answer: Answer = {
+      const answer: LlmAnswer = {
         text: sections.map((section: any) => section.text ?? '').join('\n'),
-        cited: [...new Set<string>(sections.flatMap((section: any) => section.annotations ?? []).map(citedUrl).filter((url: string | null): url is string => Boolean(url)))],
+        cited: unique(sections.flatMap((section: any) => section.annotations ?? []).map(citedUrl)),
         fan_out_queries: result.fan_out_queries ?? [],
+        retrieved: Array.isArray(result.search_results) ? unique(result.search_results.map((row: any) => (row.url ? withoutTracking(row.url) : null))) : null,
       };
       this.cache.put(endpoint, task, answer, reply.cost);
       answers.push(answer);
@@ -521,13 +575,17 @@ export class DataForSeo {
     }
     const bare = bareDomain(look.domain);
     const brand = look.brand?.toLowerCase();
-    const count = (test: (answer: Answer) => boolean) => answers.filter(test).length;
+    const own = (url: string) => isDomain(hostOf(url), bare);
+    const count = (test: (answer: LlmAnswer) => boolean) => answers.filter(test).length;
     return {
       value: {
         samples: answers.length,
         // A model can answer from memory with web search on, so a low citation count may just mean this is low.
         with_sources: count((answer) => answer.cited.length > 0),
-        cited_in: count((answer) => answer.cited.some((url) => isDomain(hostOf(url), bare))),
+        cited_in: count((answer) => answer.cited.some(own)),
+        // Only some engines list what they retrieved. retrieved_in counts within the samples that did.
+        retrieved_reported: count((answer) => answer.retrieved !== null),
+        retrieved_in: count((answer) => Boolean(answer.retrieved?.some(own))),
         brand_named_in: brand ? count((answer) => answer.text.toLowerCase().includes(brand)) : null,
         fan_out_queries: [...new Set(answers.flatMap((answer) => answer.fan_out_queries))],
         answers,

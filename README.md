@@ -99,6 +99,23 @@ To store these with a crawl and see them in the **AI citations** Elements view a
 
 Google hides many results behind a redirect link, so for those a rank check knows the site but not the exact page, and its URL is the site's home page.
 
+**The AI funnel** shows where you drop out of an answer, rather than only whether you were cited. For each prompt it asks one engine several times and reports four steps:
+
+```bash
+sak ai-funnel example.com --engine chat_gpt --model gpt-4.1-mini --file prompts.txt --crawl <crawl-id>
+```
+
+- **Searches run:** the queries the model sent to its search tool, often called fan-out.
+- **Ranked for:** how many of those queries have you in Google's top 10. This is a stand-in, because not every engine searches Google. `--no-rank` skips it.
+- **Retrieved in:** how many samples had one of your pages in the model's search results.
+- **Cited in:** how many samples cited you.
+
+The outcome is the first step that failed: answered without searching, not ranked, not retrieved, not cited, or cited. It also lists the domains cited instead of you.
+
+Engines report different steps, so a blank count means the engine didn't say, and it isn't a zero. When this was built, ChatGPT reported all of them, Gemini reported its searches but not what it retrieved, Perplexity reported what it retrieved but not its searches, and Claude often answered from memory without searching.
+
+`--file` takes one prompt per line, up to 50. `--crawl` stores the rows in that crawl's **AI funnel** Elements view, and your cited pages in **AI citations**. Without it the result is only printed. `sak crawl` takes `--prompts-file` with `--engine` and `--model` to collect it when the crawl finishes, and MCP clients use `ai_funnel`. The estimate is a ceiling of 10 rank checks per prompt, since the searches aren't known until the prompt has run. With 3 samples that's up to about $0.12 a prompt.
+
 **Outcomes, free, from your own accounts.**
 
 - **AI referrals:** collected with GA4 and shown in the **AI referrals** Elements view. Visits with no referrer can't be counted, so this is a minimum.

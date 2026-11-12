@@ -192,7 +192,7 @@ const ELEMENT_GROUPS: { label: string; keys: string[] }[] = [
   { label: 'Technical', keys: ['internal', 'external', 'response', 'canonical', 'directives', 'hreflang', 'javascript', 'links', 'images', 'css', 'scripts'] },
   { label: 'On-page', keys: ['title', 'meta', 'h1', 'h2', 'head'] },
   { label: 'Content', keys: ['content', 'schema'] },
-  { label: 'AI', keys: ['ai-readiness', 'ai-bots', 'ai-citations', 'ai-traffic', 'ai-search', 'ai-queries'] },
+  { label: 'AI', keys: ['ai-readiness', 'ai-bots', 'ai-citations', 'ai-funnel', 'ai-traffic', 'ai-search', 'ai-queries'] },
   { label: 'Search data', keys: ['search', 'queries', 'index-status', 'not-in-crawl', 'speed', 'gbp'] },
 ];
 
@@ -205,6 +205,7 @@ function elementHint(key: string, crawl: string): ReactNode {
     case 'speed': return <>Collect this from the command line: {code(`sak psi ${crawl}`)} and {code(`sak crux ${crawl}`)}</>;
     case 'ai-search': case 'ai-queries': return <>Export the report as a CSV, then run: {code(`sak ai-import ${crawl} --source gsc|bing --file report.csv`)}</>;
     case 'ai-citations': return <>Start a crawl from the command line with {code('--ai-overview')} or {code('--llm')}. These cost money and ask first.</>;
+    case 'ai-funnel': return <>Collect this from the command line. It costs money and asks first: {code(`sak ai-funnel <domain> --engine chat_gpt --model gpt-4.1-mini --file prompts.txt --crawl ${crawl} --yes`)}</>;
     case 'search': case 'queries': case 'index-status': case 'not-in-crawl': case 'ai-traffic': return fromPull;
     default: return null;
   }
@@ -619,6 +620,10 @@ function PaidValue({ kind, value }: { kind: string; value: any }) {
   if (kind === 'llm_citations') {
     return <ul className="plain-list">{(value as any[]).map((row) => <li key={row.target}>{row.target}: {row.mentions ?? 'no'} citations</li>)}</ul>;
   }
+  if (kind === 'ai_funnel') {
+    const stages: [string, string][] = [['cited', 'cited'], ['not_cited', 'not cited'], ['not_retrieved', 'not retrieved'], ['not_ranked', 'not ranked'], ['no_search', 'answered without searching']];
+    return <span>{value.rows.length} prompts: {stages.filter(([key]) => value.by_stage[key] > 0).map(([key, label]) => `${value.by_stage[key]} ${label}`).join(', ')}. See AI funnel in the Elements tab.</span>;
+  }
   if (kind === 'ai_mode') {
     return <ul className="plain-list">{(value as any[]).map((row) => <li key={row.keyword}>{row.keyword}: {row.cited ? 'cited' : row.answer ? 'answered, not cited' : 'no AI answer'}</li>)}</ul>;
   }
@@ -631,7 +636,7 @@ function PaidValue({ kind, value }: { kind: string; value: any }) {
 
 function SearchDataView({ crawl, refresh, overview, onChanged }: { crawl: string; refresh: number; overview: Crawl; onChanged: () => void }) {
   const { data, error } = useApi<{ kind: string; key: string; value: any; cost: number; cached: number; error: string | null }[]>(`/api/crawls/${crawl}/paid`, refresh);
-  const labels: Record<string, string> = { backlinks: 'Backlinks', backlink_list: 'Backlinks list', volume: 'Search volume', rank: 'Google rank', ai_overview: 'AI Overview keywords', ai_mode: 'AI Mode', llm_citations: 'AI citations', llm_pages: 'AI-cited pages', budget: 'Spending limit' };
+  const labels: Record<string, string> = { backlinks: 'Backlinks', backlink_list: 'Backlinks list', volume: 'Search volume', rank: 'Google rank', ai_overview: 'AI Overview keywords', ai_mode: 'AI Mode', llm_citations: 'AI citations', llm_pages: 'AI-cited pages', ai_funnel: 'AI funnel', budget: 'Spending limit' };
   if (error) return <Failure message={error} />;
   if (!data) return <TableSkeleton />;
   const list = data.find((row) => row.kind === 'backlink_list' && !row.error)?.value as BacklinkList | undefined;

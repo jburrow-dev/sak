@@ -91,6 +91,10 @@ const AI_BOT_SOURCE = `SELECT b.rowid AS id, b.name, b.owner, b.purpose, b.robot
 const AI_CITATION_SOURCE = `SELECT c.rowid AS id, c.url, c.engine, c.subject, c.volume, u.id IS NOT NULL AS in_crawl, u.indexable, r.status, u.link_score, p.word_count
   FROM ai_citations c LEFT JOIN urls u ON u.url = c.url LEFT JOIN responses r ON r.url_id = u.id LEFT JOIN page_elements p ON p.url_id = u.id`;
 
+const AI_FUNNEL_SOURCE = `SELECT f.rowid AS id, f.prompt, f.engine, f.model, f.stage, f.samples, f.fan_out, f.ranked_for, f.retrieved_in, f.cited_in, f.fan_out_queries, f.own_urls, f.cited_instead,
+    CASE f.stage WHEN 'cited' THEN 'Cited' WHEN 'not_cited' THEN 'Not cited' WHEN 'not_retrieved' THEN 'Not retrieved' WHEN 'not_ranked' THEN 'Not ranked' ELSE 'Answered without searching' END AS outcome
+  FROM ai_funnel f`;
+
 const AI_TRAFFIC_SOURCE = `SELECT r.rowid AS id, r.url, r.source, r.sessions, r.engaged_sessions, r.key_events FROM ai_referrals r`;
 
 const AI_SEARCH_PAGE_SOURCE = `SELECT a.rowid AS id, a.url, a.source, a.impressions, a.citations, a.in_crawl, u.indexable FROM ai_search_pages a LEFT JOIN urls u ON u.url = a.url`;
@@ -248,8 +252,16 @@ const ELEMENTS: ElementDefinition[] = [
     label: 'AI citations',
     source: AI_CITATION_SOURCE,
     search: ['url', 'subject', 'engine'],
-    columns: [URL_COLUMN, column('engine', 'Engine'), column('subject', 'Keyword'), column('volume', 'Search volume', 'number'), column('in_crawl', 'In crawl', 'yesno'), STATUS_COLUMN, column('indexable', 'Indexable', 'yesno'), column('link_score', 'Link score', 'number'), column('word_count', 'Words', 'number')],
-    filters: [ALL, filter('overview', 'AI Overviews', `engine = 'google_ai_overview'`), filter('ai-mode', 'AI Mode', `engine = 'google_ai_mode'`), filter('llm', 'LLM data', `engine = 'llm_mentions'`), filter('not-crawled', 'Not in crawl', 'NOT in_crawl'), filter('non-indexable', 'Not indexable', 'indexable = 0')],
+    columns: [URL_COLUMN, column('engine', 'Engine'), column('subject', 'Keyword or prompt'), column('volume', 'Search volume', 'number'), column('in_crawl', 'In crawl', 'yesno'), STATUS_COLUMN, column('indexable', 'Indexable', 'yesno'), column('link_score', 'Link score', 'number'), column('word_count', 'Words', 'number')],
+    filters: [ALL, filter('overview', 'AI Overviews', `engine = 'google_ai_overview'`), filter('ai-mode', 'AI Mode', `engine = 'google_ai_mode'`), filter('llm', 'LLM data', `engine = 'llm_mentions'`), filter('prompts', 'Prompts', `engine IN ('chat_gpt', 'claude', 'gemini', 'perplexity')`), filter('not-crawled', 'Not in crawl', 'NOT in_crawl'), filter('non-indexable', 'Not indexable', 'indexable = 0')],
+  },
+  {
+    key: 'ai-funnel',
+    label: 'AI funnel',
+    source: AI_FUNNEL_SOURCE,
+    search: ['prompt', 'fan_out_queries', 'cited_instead'],
+    columns: [column('prompt', 'Prompt'), column('engine', 'Engine'), column('outcome', 'Outcome'), column('samples', 'Samples', 'number'), column('fan_out', 'Searches run', 'number'), column('ranked_for', 'Ranked for', 'number'), column('retrieved_in', 'Retrieved in', 'number'), column('cited_in', 'Cited in', 'number'), column('cited_instead', 'Cited instead'), column('fan_out_queries', 'Fan-out queries'), column('own_urls', 'Your pages'), column('model', 'Model')],
+    filters: [ALL, filter('cited', 'Cited', `stage = 'cited'`), filter('not-cited', 'Not cited', `stage = 'not_cited'`), filter('not-retrieved', 'Not retrieved', `stage = 'not_retrieved'`), filter('not-ranked', 'Not ranked', `stage = 'not_ranked'`), filter('no-search', 'Answered without searching', `stage = 'no_search'`)],
   },
   {
     key: 'ai-traffic',

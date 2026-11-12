@@ -1,5 +1,6 @@
 import { getMeta, setMeta, type Db } from '@sak/core';
 import { BACKLINK_LIMIT, DataForSeo, ESTIMATED_COST, type BacklinkRow } from './dataforseo.ts';
+import { aiFunnel, estimateFunnel, storeFunnel, type FunnelOptions } from './funnel.ts';
 import { crawlResolver } from './match.ts';
 
 /** Optional DataForSEO data to collect for one crawl. */
@@ -19,12 +20,14 @@ export interface PaidPlan {
   /** Citations in AI answers, against these competitors, plus the most-cited pages. */
   llm?: boolean;
   competitors?: string[];
+  /** Prompts to follow through one AI engine, from its searches to its citations. */
+  funnel?: FunnelOptions & { prompts: string[] };
 }
 
 const AI_KEYWORD_LIMIT = 100;
 const LLM_PAGE_LIMIT = 100;
 
-export const emptyPlan = (plan: PaidPlan) => !plan.backlinks && !plan.backlinkList && !plan.aiOverview && !plan.llm && !(plan.keywords.length > 0 && (plan.volume || plan.rank || plan.aiMode));
+export const emptyPlan = (plan: PaidPlan) => !plan.backlinks && !plan.backlinkList && !plan.aiOverview && !plan.llm && !plan.funnel?.prompts.length && !(plan.keywords.length > 0 && (plan.volume || plan.rank || plan.aiMode));
 
 /** The most the plan can cost. Anything already cached is free, so it may cost less. */
 export function estimatePlan(plan: PaidPlan): number {
@@ -35,7 +38,8 @@ export function estimatePlan(plan: PaidPlan): number {
     + (plan.rank ? keywords * ESTIMATED_COST.rankCheck : 0)
     + (plan.aiOverview ? ESTIMATED_COST.aiOverviewKeywords + AI_KEYWORD_LIMIT * ESTIMATED_COST.aiOverviewKeywordRow : 0)
     + (plan.aiMode ? keywords * ESTIMATED_COST.aiMode : 0)
-    + (plan.llm ? 2 * ESTIMATED_COST.llmMentions + (1 + (plan.competitors?.length ?? 0) + LLM_PAGE_LIMIT) * ESTIMATED_COST.llmMentionsRow : 0);
+    + (plan.llm ? 2 * ESTIMATED_COST.llmMentions + (1 + (plan.competitors?.length ?? 0) + LLM_PAGE_LIMIT) * ESTIMATED_COST.llmMentionsRow : 0)
+    + (plan.funnel?.prompts.length ? estimateFunnel(plan.funnel.prompts.length, plan.funnel.samples, plan.funnel.rank) : 0);
 }
 
 export interface PaidRow {
@@ -133,6 +137,11 @@ export async function enrichCrawl(db: Db, client: DataForSeo, plan: PaidPlan): P
     for (const page of pages ?? []) {
       if (page.own) citation(page.page, 'llm_mentions', 'all prompts', page.ai_search_volume);
     }
+  }
+  if (plan.funnel?.prompts.length) {
+    const { prompts, ...settings } = plan.funnel;
+    const found = await record('ai_funnel', `${settings.engine}:${settings.model}`, () => aiFunnel(client, domain, prompts, { location: plan.location, language: plan.language, ...settings }, { confirmed: true }));
+    if (found) storeFunnel(db, found.rows);
   }
 }
 

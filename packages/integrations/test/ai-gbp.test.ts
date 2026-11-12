@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database, createCrawlDb, listIssues, listElement, runAnalysis, setMeta, writeSettings, type Db } from '@sak/core';
-import { ApiCache, BudgetExceeded, CostConfirmationRequired, DataForSeo, ESTIMATED_COST, MemoryStore, PaidApisDisabled, budgetStatus, collectReferences, enrichCrawl, estimateGbp, estimatePlan, emptyPlan, importAiExport, importAiReferrals, importGbp, inspectUrls, parseCsv, parsePageSpeed, readPaidData, runCrux, runPageSpeed } from '../src/index.ts';
+import { ApiCache, BudgetExceeded, CostConfirmationRequired, DataForSeo, ESTIMATED_COST, FUNNEL_FAN_OUT_LIMIT, MemoryStore, aiFunnel, estimateFunnel, funnelStage, PaidApisDisabled, budgetStatus, collectReferences, enrichCrawl, estimateGbp, estimatePlan, emptyPlan, importAiExport, importAiReferrals, importGbp, inspectUrls, parseCsv, parsePageSpeed, readPaidData, runCrux, runPageSpeed } from '../src/index.ts';
 
 let home: string;
 let cache: ApiCache;
@@ -492,6 +492,105 @@ describe('AI report exports', () => {
     expect(listElement(db, 'ai-search').items.map((row: any) => [row.source, row.url])).toEqual([['gsc', 'https://example.com/'], ['bing', 'https://example.com/guide']]);
     expect(() => importAiExport(db, 'gsc', 'Foo,Bar\n1,2\n')).toThrow('Foo, Bar');
     expect(() => importAiExport(db, 'gsc', '')).toThrow('no rows');
+    db.close();
+  });
+});
+
+describe('AI funnel', () => {
+  const llmTask = (prompt: string, sample: number) => ({ user_prompt: prompt, model_name: 'm', web_search: true, max_output_tokens: 1024, tag: `sample-${sample}` });
+  const llmReply = (result: Record<string, unknown>, notes: unknown[]) => dfs([{ ...result, items: [{ type: 'message', sections: [{ type: 'text', text: 'x', annotations: notes }] }] }], 0.03);
+  const serpReply = (items: unknown[]) => dfs([{ items }], 0.002);
+  const settings = { engine: 'chat_gpt' as const, model: 'm', samples: 2 };
+
+  it('keeps the pages a model retrieved, without ChatGPT\'s tracking parameter', async () => {
+    const reply = llmReply({ search_results: [{ url: 'https://example.com/guide?utm_source=openai' }, { url: 'https://rival.com/a?x=1&utm_source=openai' }] }, [{ url: 'https://rival.com/a?x=1&utm_source=openai' }]);
+    const { value } = await new DataForSeo(secrets, cache, vi.fn(async () => reply) as never).llmPrompt('chat_gpt', 'q', 'm', { domain: 'example.com' }, 1, { confirmed: true });
+    expect(value.answers[0]).toMatchObject({ retrieved: ['https://example.com/guide', 'https://rival.com/a?x=1'], cited: ['https://rival.com/a?x=1'] });
+    expect(value).toMatchObject({ retrieved_reported: 1, retrieved_in: 1, cited_in: 0 });
+  });
+
+  it('reports retrieved pages as unknown when the engine lists none', async () => {
+    const { value } = await new DataForSeo(secrets, cache, vi.fn(async () => llmReply({ fan_out_queries: ['a'] }, [])) as never).llmPrompt('gemini', 'q', 'm', { domain: 'example.com' }, 1, { confirmed: true });
+    expect(value.answers[0].retrieved).toBeNull();
+    expect(value.retrieved_reported).toBe(0);
+  });
+
+  it('pays again for an answer cached before retrieved pages were kept', () => {
+    cache.put('ai_optimization/chat_gpt/llm_responses/live', llmTask('q', 0), { text: 'x', cited: [], fan_out_queries: [] }, 0.03);
+    const client = new DataForSeo(secrets, cache, vi.fn() as never);
+    expect(client.llmPromptMisses('chat_gpt', 'q', 'm', 1)).toBe(1);
+    cache.put('ai_optimization/chat_gpt/llm_responses/live', llmTask('q', 0), { text: 'x', cited: [], fan_out_queries: [], retrieved: null }, 0.03);
+    expect(client.llmPromptMisses('chat_gpt', 'q', 'm', 1)).toBe(0);
+  });
+
+  it('names the first step that fails', () => {
+    const base = { with_sources: 1, fan_out: [{ query: 'a', position: null, url: null }], ranked_for: null, retrieved_in: null, cited_in: 0 };
+    expect(funnelStage({ ...base, cited_in: 1, ranked_for: 0, retrieved_in: 0 })).toBe('cited');
+    expect(funnelStage({ ...base, with_sources: 0, fan_out: [] })).toBe('no_search');
+    expect(funnelStage({ ...base, ranked_for: 0, retrieved_in: 0 })).toBe('not_ranked');
+    expect(funnelStage({ ...base, ranked_for: 1, retrieved_in: 0 })).toBe('not_retrieved');
+    expect(funnelStage({ ...base, ranked_for: 0, retrieved_in: 1 })).toBe('not_cited');
+    // Perplexity lists no searches, so only retrieval can be judged.
+    expect(funnelStage({ ...base, fan_out: [], retrieved_in: 0 })).toBe('not_retrieved');
+    // Gemini lists no retrieved pages, so a ranked page that isn't cited can't be placed any earlier.
+    expect(funnelStage({ ...base, ranked_for: 1 })).toBe('not_cited');
+  });
+
+  it('quotes the ceiling once, then follows a prompt from its searches to its citations', async () => {
+    const samples = [
+      llmReply({ fan_out_queries: ['q one', 'Q One ', 'q two'], search_results: [{ url: 'https://example.com/guide?utm_source=openai' }, { url: 'https://rival.com/a' }] }, [{ url: 'https://rival.com/a?utm_source=openai' }]),
+      llmReply({ fan_out_queries: ['q one'], search_results: [{ url: 'https://rival.com/a' }] }, [{ url: 'https://rival.com/a' }, { url: 'https://www.other.com/b' }]),
+    ];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.includes('llm_responses')) return samples.shift()!;
+      return serpReply(JSON.parse(init.body as string)[0].keyword === 'q one' ? [{ type: 'organic', rank_group: 3, domain: 'example.com', url: 'https://example.com/guide' }] : []);
+    });
+    const client = new DataForSeo(secrets, cache, fetchImpl as never);
+    const blocked = await aiFunnel(client, 'example.com', ['best crawler?'], settings).catch((e) => e);
+    expect(blocked).toBeInstanceOf(CostConfirmationRequired);
+    expect(blocked.estimate).toBeCloseTo(estimateFunnel(1, 2));
+    expect(estimateFunnel(1, 2)).toBeCloseTo(2 * ESTIMATED_COST.llmPrompt + FUNNEL_FAN_OUT_LIMIT * ESTIMATED_COST.rankCheck);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    const { value, cost } = await aiFunnel(client, 'example.com', ['best crawler?'], settings, { confirmed: true });
+    expect(value.rows[0]).toMatchObject({
+      samples: 2, with_sources: 2, ranked_for: 1, retrieved_in: 1, cited_in: 0, stage: 'not_cited',
+      fan_out: [{ query: 'q one', position: 3, url: 'https://example.com/guide' }, { query: 'q two', position: null, url: null }],
+      own_retrieved: ['https://example.com/guide'], own_cited: [],
+      cited_instead: [{ domain: 'rival.com', samples: 2 }, { domain: 'other.com', samples: 1 }],
+    });
+    expect(value.by_stage).toMatchObject({ not_cited: 1, cited: 0 });
+    expect(cost).toBeCloseTo(0.064);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+
+    // Everything is cached now, so it runs free and unconfirmed.
+    const again = await aiFunnel(client, 'example.com', ['best crawler?'], settings);
+    expect(again.cost).toBe(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it('skips the rank checks when asked, and refuses while paid APIs are off', async () => {
+    const fetchImpl = vi.fn(async () => llmReply({ fan_out_queries: ['a'] }, []));
+    const client = new DataForSeo(secrets, cache, fetchImpl as never);
+    const { value } = await aiFunnel(client, 'example.com', ['p'], { ...settings, samples: 1, rank: false }, { confirmed: true });
+    expect(value.rows[0]).toMatchObject({ ranked_for: null, retrieved_in: null, stage: 'not_cited', fan_out: [{ query: 'a', position: null }] });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    writeSettings({ paidApis: false });
+    await expect(aiFunnel(client, 'example.com', ['other'], settings)).rejects.toBeInstanceOf(PaidApisDisabled);
+    writeSettings({ paidApis: true });
+  });
+
+  it('stores a crawl\'s funnel, and lists its cited pages with the other AI citations', async () => {
+    const fetchImpl = vi.fn(async () => llmReply({ fan_out_queries: ['a'] }, [{ direct_url: 'https://www.example.com/guide/' }, { direct_url: 'https://rival.com/x' }]));
+    const db = crawl();
+    const plan = { backlinks: false, volume: false, rank: false, keywords: [], funnel: { engine: 'gemini' as const, model: 'm', prompts: ['best plumber?'], samples: 1, rank: false } };
+    expect(emptyPlan(plan)).toBe(false);
+    expect(estimatePlan(plan)).toBeCloseTo(ESTIMATED_COST.llmPrompt);
+    await enrichCrawl(db, new DataForSeo(secrets, cache, fetchImpl as never), plan);
+    expect(listElement(db, 'ai-funnel', { limit: 10 }).items[0]).toMatchObject({ prompt: 'best plumber?', engine: 'gemini', outcome: 'Cited', fan_out: 1, ranked_for: null, retrieved_in: null, cited_in: 1, cited_instead: 'rival.com', own_urls: 'https://example.com/guide' });
+    expect(listElement(db, 'ai-funnel', { limit: 10, filter: 'not-cited' }).total).toBe(0);
+    expect(listElement(db, 'ai-citations', { limit: 10, filter: 'prompts' }).items[0]).toMatchObject({ url: 'https://example.com/guide', engine: 'gemini', subject: 'best plumber?', in_crawl: 1 });
+    expect(readPaidData(db).map((row) => row.kind)).toEqual(['ai_funnel']);
     db.close();
   });
 });

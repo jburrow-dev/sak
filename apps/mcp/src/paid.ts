@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { openCrawlDb, readSettings, readSiteAudit, runAnalysis } from '@sak/core';
-import { ApiCache, CostConfirmationRequired, DataForSeo, KeychainStore, PaidApisDisabled, budgetStatus, emptyPlan, enrichCrawl, estimatePlan, googleAccounts, importAiExport, importAiReferrals, importAnalytics, importBing, importGbp, importSearchConsole, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, propertyCovers, readConnections, readPaidData, runCrux, runPageSpeed, suggestProperty, type TrafficSource } from '@sak/integrations';
+import { ApiCache, CostConfirmationRequired, DataForSeo, FUNNEL_PROMPT_LIMIT, KeychainStore, aiFunnel, storeFunnel, PaidApisDisabled, budgetStatus, emptyPlan, enrichCrawl, estimatePlan, googleAccounts, importAiExport, importAiReferrals, importAnalytics, importBing, importGbp, importSearchConsole, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, propertyCovers, readConnections, readPaidData, runCrux, runPageSpeed, suggestProperty, type TrafficSource } from '@sak/integrations';
 
 type Reply = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
@@ -118,6 +118,35 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
     },
   }, ({ engine, model, prompt, domain, brand, samples, confirm, refresh }) => paid((client) => client.llmPrompt(engine, prompt, model, { domain, brand }, samples ?? 3, { confirmed: confirm, refresh })));
 
+  const funnelFields = {
+    engine: z.enum(['chat_gpt', 'claude', 'gemini', 'perplexity']),
+    model: z.string().describe('A model name DataForSEO accepts for this engine, for example gpt-4.1-mini'),
+    prompts: z.array(z.string().max(500)).min(1).max(FUNNEL_PROMPT_LIMIT),
+    samples: z.number().int().min(1).max(10).optional().describe('How many times to ask each prompt (default 3)'),
+    rank: z.boolean().optional().describe('Also check Google\'s top 10 for each search the model ran (default true). A stand-in, since not every engine searches Google.'),
+  };
+
+  server.registerTool('ai_funnel', {
+    description: 'Paid. Follows each prompt through one AI engine and names the first step where the domain drops out: the searches the model ran (fan-out), whether the domain ranks for them, whether its pages were retrieved, and whether they were cited. Engines report different steps: a null count means the engine didn\'t report it, not zero. Pass id to store the rows with a crawl, where they appear in its ai-funnel element. Without confirm it returns the most it can cost and spends nothing.',
+    inputSchema: { domain: z.string(), ...funnelFields, id: z.string().optional().describe('A crawl to store the result with'), ...whereFields, confirm: confirmField, refresh: refreshField },
+  }, ({ domain, engine, model, prompts, samples, rank, id, location, language, confirm, refresh }) => {
+    const run = (client: DataForSeo) => aiFunnel(client, domain, prompts, { engine, model, samples, rank, ...place(location, language) }, { confirmed: confirm, refresh });
+    if (!id) return paid(run);
+    return withWritableCrawl(id, async (db) => {
+      const cache = new ApiCache();
+      try {
+        const answer = await run(new DataForSeo(secrets, cache));
+        storeFunnel(db, answer.value.rows);
+        return answer;
+      } catch (error) {
+        if (error instanceof CostConfirmationRequired) return { needs_confirmation: true, estimated_cost_usd: error.estimate, message: error.message };
+        throw error;
+      } finally {
+        cache.close();
+      }
+    });
+  });
+
   server.registerTool('gbp_check', {
     description: 'Paid. Reads a public Google Business Profile, with recent reviews and posts, stores it with a crawl and compares it to the site. Owner-only figures such as calls and views aren\'t available this way. Without confirm it returns the estimated cost and spends nothing. Reviews and posts can take a few minutes.',
     inputSchema: {
@@ -157,11 +186,12 @@ export function dataForSeoTools(server: McpServer, json: (value: unknown) => Rep
       ai_mode: z.boolean().optional(),
       llm: z.boolean().optional(),
       competitors: z.array(z.string()).max(9).optional().describe('Domains to compare against in the llm step'),
+      funnel: z.object(funnelFields).optional().describe('Prompts to follow through one AI engine, as ai_funnel does, stored in the ai-funnel element'),
       ...whereFields,
       confirm: confirmField,
     },
-  }, ({ id, backlinks, backlink_list, volume, rank, keywords, ai_overview, ai_mode, llm, competitors, location, language, confirm }) => {
-    const plan = { backlinks: Boolean(backlinks), backlinkList: Boolean(backlink_list), volume: Boolean(volume), rank: Boolean(rank), keywords: keywords ?? [], location, language, aiOverview: Boolean(ai_overview), aiMode: Boolean(ai_mode), llm: Boolean(llm), competitors };
+  }, ({ id, backlinks, backlink_list, volume, rank, keywords, ai_overview, ai_mode, llm, competitors, funnel, location, language, confirm }) => {
+    const plan = { backlinks: Boolean(backlinks), backlinkList: Boolean(backlink_list), volume: Boolean(volume), rank: Boolean(rank), keywords: keywords ?? [], location, language, aiOverview: Boolean(ai_overview), aiMode: Boolean(ai_mode), llm: Boolean(llm), competitors, funnel };
     return withWritableCrawl(id, async (db) => {
       if (emptyPlan(plan)) return readPaidData(db);
       if (!readSettings().paidApis) throw new PaidApisDisabled();

@@ -6,7 +6,7 @@ import {
   type CrawlConfig, type CrawlProgress, type ExportKind,
 } from '@sak/core';
 import { PaidApisDisabled, emptyPlan, estimatePlan, savePaidPlan, saveTrafficPlan, type PaidPlan } from '@sak/integrations';
-import { checkPlanBudget, printPaidData, runIntegrationCommand, runPaidPlan, runTraffic, trafficPlanFromFlags } from './integrations.ts';
+import { checkPlanBudget, funnelFromFlags, printPaidData, readPrompts, runIntegrationCommand, runPaidPlan, runTraffic, trafficPlanFromFlags } from './integrations.ts';
 
 const USAGE = `sak: local SEO crawler
 
@@ -16,6 +16,7 @@ Crawling
                   [--robots respect|ignore] [--robots-file PATH] [--no-sitemaps] [--no-external] [--no-images]
                   [--no-resources] [--render] [--subdomains] [--seed URL]... [--probe-ai-bots] [--store-html]
                   [--backlinks] [--backlink-list] [--keywords "a,b" --volume --rank --ai-mode] [--ai-overview] [--llm] [--competitor DOMAIN]... [--yes]
+                  [--prompts-file PATH --engine ENGINE --model NAME [--samples 3] [--no-rank]]
                   [--gsc PROPERTY] [--ga4 ID] [--bing SITE] [--days 30|60|90] [--account EMAIL] [--bing-key NAME]
                   [--top-queries] [--inspect N]
   sak resume <id>
@@ -52,6 +53,7 @@ Integrations
   sak ai-mode <domain> <keyword>... [--location 2840] [--language en] [--refresh] [--yes]
   sak llm <domain> [--competitor DOMAIN]... [--location 2840] [--language en] [--refresh] [--yes]
   sak llm-prompt <domain> --engine chat_gpt|claude|gemini|perplexity --model NAME --prompt TEXT [--brand NAME] [--samples 3] [--refresh] [--yes]
+  sak ai-funnel <domain> --engine chat_gpt|claude|gemini|perplexity --model NAME (--prompt TEXT | --file PATH) [--samples 3] [--no-rank] [--crawl ID] [--refresh] [--yes]
   sak gbp <id> <name|cid:ID|place_id:ID> [--reviews 50] [--no-posts] [--location 2840] [--language en] [--refresh] [--yes]
   sak cost
   sak budget [--run USD] [--monthly USD]
@@ -105,7 +107,7 @@ async function main() {
       location: { type: 'string' }, language: { type: 'string' }, refresh: { type: 'boolean' }, yes: { type: 'boolean' },
       gsc: { type: 'string' }, ga4: { type: 'string' }, bing: { type: 'string' }, account: { type: 'string' }, 'bing-key': { type: 'string' }, 'top-queries': { type: 'boolean' }, inspect: { type: 'string' }, label: { type: 'string' },
       'probe-ai-bots': { type: 'boolean' }, 'store-html': { type: 'boolean' }, 'ai-overview': { type: 'boolean' }, 'ai-mode': { type: 'boolean' }, llm: { type: 'boolean' }, competitor: { type: 'string', multiple: true },
-      source: { type: 'string' }, file: { type: 'string' }, engine: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' }, brand: { type: 'string' }, samples: { type: 'string' },
+      source: { type: 'string' }, file: { type: 'string' }, engine: { type: 'string' }, model: { type: 'string' }, prompt: { type: 'string' }, brand: { type: 'string' }, samples: { type: 'string' }, 'prompts-file': { type: 'string' }, 'no-rank': { type: 'boolean' }, crawl: { type: 'string' },
       reviews: { type: 'string' }, 'no-posts': { type: 'boolean' }, monthly: { type: 'string' }, run: { type: 'string' },
     },
   });
@@ -156,6 +158,7 @@ async function main() {
         aiMode: Boolean(values['ai-mode']),
         llm: Boolean(values.llm),
         competitors: values.competitor,
+        ...(values['prompts-file'] ? { funnel: funnelFromFlags(values, readPrompts(values['prompts-file'])) } : {}),
       };
       const traffic = await trafficPlanFromFlags(values);
       const id = newCrawlId(resolved.startUrl);

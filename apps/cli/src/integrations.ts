@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
 import { readFileSync } from 'node:fs';
 import { getMeta, openCrawlDb, readSettings, readSiteAudit, runAnalysis, trafficPulls, withCrawl, writeSettings, type Db } from '@sak/core';
-import { ApiCache, BACKLINK_LIMIT, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, KeychainStore, addBingKey, budgetStatus, checkBudget, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAiExport, importAiReferrals, importAnalytics, importGbp, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runCrux, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type BacklinkList, type LlmEngine, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
+import { ApiCache, BACKLINK_LIMIT, CostConfirmationRequired, DEFAULT_INSPECTIONS, DataForSeo, FUNNEL_STAGES, KeychainStore, addBingKey, aiFunnel, storeFunnel, budgetStatus, checkBudget, disconnectGoogle, emptyTrafficPlan, googleAccounts, googleLogin, importAiExport, importAiReferrals, importAnalytics, importGbp, importSearchConsole, inspectMore, listAnalyticsProperties, listBingSites, listSearchConsoleProperties, pagesForSpeedTest, parseTrafficPlan, propertyCovers, readConnections, readPaidData, readTrafficPlan, removeBingKey, resolveTrafficPlan, runCrux, runPageSpeed, runSavedPaidPlan, runSavedTrafficPlan, runTrafficPlan, saveTrafficPlan, suggestProperty, type BacklinkList, type FunnelOptions, type FunnelStage, type LlmEngine, type PropertyOption, type TrafficPlan, type TrafficSource } from '@sak/integrations';
 
 const KEYS: Record<string, string> = {
   dataforseo: 'DataForSEO login:password',
@@ -21,6 +21,21 @@ function promptHidden(label: string): Promise<string> {
     resolve(line.trim());
   }));
 }
+
+const ENGINES = ['chat_gpt', 'claude', 'gemini', 'perplexity'];
+
+/** One prompt per line. Blank lines and lines starting with # are skipped. */
+export function readPrompts(path: string): string[] {
+  return readFileSync(path, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+}
+
+export function funnelFromFlags(values: Record<string, any>, prompts: string[]): FunnelOptions & { prompts: string[] } {
+  if (!ENGINES.includes(values.engine) || !values.model) throw new Error(`Prompts need --engine ${ENGINES.join('|')} and --model NAME`);
+  if (prompts.length === 0) throw new Error('No prompts were given');
+  return { prompts, engine: values.engine as LlmEngine, model: values.model, samples: Number(values.samples ?? 3), rank: !values['no-rank'] };
+}
+
+const STAGE_LABELS: Record<FunnelStage, string> = { no_search: 'Answered without searching', not_ranked: 'Not ranked', not_retrieved: 'Not retrieved', not_cited: 'Not cited', cited: 'Cited' };
 
 export async function runPaidPlan(id: string): Promise<void> {
   const db = openCrawlDb(id);
@@ -271,6 +286,32 @@ export async function runIntegrationCommand(command: string, positionals: string
         console.log(`Limit per run: $${status.run_budget_usd.toFixed(2)}\nLimit per month: $${status.monthly_budget_usd.toFixed(2)}\nSpent this month: $${status.spent_this_month_usd.toFixed(4)}`);
       } finally {
         cache.close();
+      }
+      return true;
+    }
+    case 'ai-funnel': {
+      if (!positionals[0] || (!values.prompt && !values.file)) throw new Error('Usage: sak ai-funnel <domain> --engine ENGINE --model NAME (--prompt TEXT | --file PATH) [--samples 3] [--no-rank] [--crawl ID]');
+      const { prompts, ...settings } = funnelFromFlags(values, [...(values.prompt ? [values.prompt] : []), ...(values.file ? readPrompts(values.file) : [])]);
+      const db = values.crawl ? openCrawlDb(values.crawl) : null;
+      const cache = new ApiCache();
+      try {
+        const answer = await paid((o) => aiFunnel(new DataForSeo(secrets, cache), positionals[0], prompts, { ...settings, ...where }, o));
+        if (!answer) return true;
+        const share = (count: number | null, of: number) => (count === null ? 'not reported' : `${count}/${of}`);
+        console.table(answer.value.rows.map((row) => ({
+          prompt: row.prompt.length > 50 ? `${row.prompt.slice(0, 49)}…` : row.prompt, outcome: STAGE_LABELS[row.stage], searches: row.fan_out.length,
+          ranked: share(row.ranked_for, row.fan_out.length), retrieved: share(row.retrieved_in, row.samples), cited: share(row.cited_in, row.samples), cited_instead: row.cited_instead.slice(0, 3).map((item) => item.domain).join(', '),
+        })));
+        console.log(`${FUNNEL_STAGES.filter((stage) => answer.value.by_stage[stage] > 0).map((stage) => `${STAGE_LABELS[stage]}: ${answer.value.by_stage[stage]}`).join('. ')}.`);
+        if (settings.rank) console.log(`Ranked is Google's top 10 for each search the model ran. It is a stand-in, since not every engine searches Google.`);
+        if (db) {
+          storeFunnel(db, answer.value.rows);
+          console.log(`Stored with crawl ${values.crawl}. See its AI funnel view.`);
+        }
+        console.log(`Cost: $${answer.cost.toFixed(4)}`);
+      } finally {
+        cache.close();
+        db?.close();
       }
       return true;
     }

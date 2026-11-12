@@ -182,6 +182,22 @@ CREATE TABLE IF NOT EXISTS ai_citations (
   volume REAL,
   PRIMARY KEY (url, engine, subject)
 );
+CREATE TABLE IF NOT EXISTS ai_funnel (
+  prompt TEXT NOT NULL,
+  engine TEXT NOT NULL,
+  model TEXT NOT NULL,
+  samples INTEGER NOT NULL,
+  with_sources INTEGER NOT NULL,
+  fan_out INTEGER NOT NULL,
+  -- NULL on the next two means the engine didn't report it, not zero.
+  ranked_for INTEGER,
+  retrieved_in INTEGER,
+  cited_in INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  fan_out_queries TEXT, own_urls TEXT, cited_instead TEXT,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (prompt, engine, model)
+);
 CREATE TABLE IF NOT EXISTS gbp_profile (
   key TEXT PRIMARY KEY,
   title TEXT, category TEXT, additional_categories TEXT, description TEXT, address TEXT, phone TEXT, url TEXT, domain TEXT,
@@ -192,7 +208,7 @@ CREATE TABLE IF NOT EXISTS gbp_profile (
 );
 `;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const ADDED_COLUMNS: Record<string, Record<string, string>> = {
   // h2s stays NULL on crawls saved before it existed, so they don't read as "no H2" on every page.
